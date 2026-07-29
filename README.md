@@ -2,6 +2,10 @@
 
 Native C++ / Qt 6 manager for [`ida-pro-mcp`](https://github.com/mrexodia/ida-pro-mcp) instances. Point it at binaries — one file, a folder you track across updates, or a Steam depot — and it builds an IDA database for each of them and serves every `(tag, module)` pair to an LLM over MCP on its own port.
 
+![IDA Workbench](docs/screenshot.png)
+
+One row per binary of a version: its server state, its port, its analysis status, and whether the vendor has shipped a newer build. The log below records every action, including how IDA closed each database.
+
 ## Why it exists
 
 `ida-pro-mcp` turns one open IDA database into one MCP server, on one fixed port. That is the right unit of work for the plugin — and the wrong unit of work for how reversing actually goes.
