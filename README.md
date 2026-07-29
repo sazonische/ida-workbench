@@ -199,7 +199,9 @@ ctest --test-dir build --output-on-failure
 
 The static build is a single self-contained exe: the QSS theme, the fonts, the icons and the three python helper scripts are compiled into it, and the scripts are unpacked beside `config.json` on launch — a copied exe works on its own.
 
-`.github/workflows/windows.yml` builds that static exe on GitHub Actions on every push, runs `ctest`, and produces one artifact: `ida-workbench-<version>-windows-x64.exe`. The packaging step asserts with `dumpbin` that it imports nothing but Windows system DLLs, and the python helpers are deliberately not shipped beside it — the exe carries them and writes them next to `config.json` itself. Qt is compiled from source by vcpkg, so the first run on a cold package cache takes hours while later runs restore the archives in minutes; the archives are saved even when a later step fails, so a broken test never costs a rebuild. A `v*` tag whose name matches `project(VERSION)` publishes the exe as a GitHub release.
+`.github/workflows/windows.yml` builds that static exe on GitHub Actions on every push, runs `ctest`, and produces one artifact: `ida-workbench-<version>-windows-x64.exe`. The packaging step asserts with `dumpbin` that it imports nothing but Windows system DLLs, and the python helpers are deliberately not shipped beside it — the exe carries them and writes them next to `config.json` itself. Qt is compiled from source by vcpkg, so the first run on a cold package cache takes hours while later runs restore the archives in minutes; the archives are saved even when a later step fails, so a broken test never costs a rebuild.
+
+Releases are driven by the version, not by hand: bump `project(VERSION)` in `CMakeLists.txt`, push to `main`, and the workflow tags that commit and publishes the exe under it. A version that already has a release is a no-op, so ordinary pushes publish nothing — which also means the version should be bumped when the work is ready to ship. Pushing a tag yourself still works; it just has to name the version the binaries report.
 
 ## Tests
 
