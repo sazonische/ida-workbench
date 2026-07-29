@@ -1,6 +1,10 @@
 @echo off
 REM Build a SINGLE self-contained exe using the static Qt from vcpkg.
-REM Run build-static.cmd after `vcpkg install qtbase:x64-windows-static` finishes.
+REM Install that Qt first, with EXACTLY these features (`core` = no default features):
+REM   vcpkg install "qtbase[core,doubleconversion,freetype,gui,harfbuzz,network,pcre2,png,thread,widgets]:x64-windows-static"
+REM Plain `vcpkg install qtbase:x64-windows-static` adds icu, openssl, postgresql, dbus,
+REM sql and testlib: hours of extra port builds and a 58 MB exe instead of 22 MB. Nothing
+REM is lost — the app links only Widgets and Network, and HTTPS uses Windows schannel.
 setlocal
 set "VSROOT=C:\Program Files\Microsoft Visual Studio\18\Community"
 set "CMAKE=%VSROOT%\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin"

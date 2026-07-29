@@ -53,28 +53,54 @@ jobs:
       # vcpkg commit means different port versions, which invalidates every archive. The
       # runner image bumps its vcpkg every few weeks, so restore-keys let a stale cache
       # still seed the rebuild instead of starting from nothing.
-      - name: Resolve vcpkg revision
+      # The package spec is defined once, here, so the cache key moves with it. A feature
+      # change invalidates every archive, and a key that ignored it would be worse than
+      # useless: the exact hit skips the save step below, so the newly built archives
+      # would never be stored and qtbase would rebuild from source on every run.
+      - name: Resolve vcpkg revision and package spec
         id: vcpkg
         run: |
+          $spec = "qtbase[core,doubleconversion,freetype,gui,harfbuzz,network,pcre2,png,thread,widgets]:x64-windows-static"
+          $stream = [IO.MemoryStream]::new([Text.Encoding]::UTF8.GetBytes($spec))
+          $specHash = (Get-FileHash -InputStream $stream -Algorithm SHA256).Hash.Substring(0, 12)
           $sha = git -C "$env:VCPKG_INSTALLATION_ROOT" rev-parse HEAD
+          "spec=$spec" >> $env:GITHUB_OUTPUT
+          "spec_hash=$specHash" >> $env:GITHUB_OUTPUT
           "sha=$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "$spec  (vcpkg $sha, spec $specHash)"
 
       - name: Restore vcpkg packages
         id: vcpkg-cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/vcpkg-archives
-          key: vcpkg-qtbase-static-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('.github/vcpkg-triplets/*.cmake') }}
-          restore-keys: vcpkg-qtbase-static-
+          key: vcpkg-qtbase-static-${{ steps.vcpkg.outputs.sha }}-${{ steps.vcpkg.outputs.spec_hash }}-${{ hashFiles('.github/vcpkg-triplets/*.cmake') }}
+          # Same revision and spec first; then any older cache, because ports whose ABI did
+          # not change (zlib, libpng, freetype, …) are still reused from it.
+          restore-keys: |
+            vcpkg-qtbase-static-${{ steps.vcpkg.outputs.sha }}-${{ steps.vcpkg.outputs.spec_hash }}-
+            vcpkg-qtbase-static-
 
+      # The feature list is explicit, and `core` means "no default features". vcpkg's
+      # defaults for qtbase additionally drag in icu, openssl, jpeg, zstd, brotli, sql
+      # (with sql-psql, i.e. postgresql), dbus, opengl and testlib — hours of extra port
+      # builds, and static icu alone grows the exe from 22 MB to 58 MB. Nothing here is
+      # lost: the app links only Widgets and Network, and HTTPS keeps working without
+      # openssl because Qt falls back to Windows schannel (QT_FEATURE_ssl stays 1).
+      # --clean-buildtrees-after-build: qtbase's build tree is tens of gigabytes and the
+      # runner disk is not.
       - name: Build static Qt
         env:
           VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-archives
         run: |
           New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
-          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install qtbase:x64-windows-static `
-            "--overlay-triplets=${{ github.workspace }}/.github/vcpkg-triplets"
+          "free on C: {0:N1} GB (before)" -f ((Get-PSDrive C).Free / 1GB)
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install `
+            "${{ steps.vcpkg.outputs.spec }}" `
+            "--overlay-triplets=${{ github.workspace }}/.github/vcpkg-triplets" `
+            --clean-buildtrees-after-build
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
+          "free on C: {0:N1} GB (after)" -f ((Get-PSDrive C).Free / 1GB)
 
       # Saved right after the expensive step and regardless of what follows: hours of
       # qtbase build must not be discarded because a test broke afterwards. Skipped on an
@@ -121,12 +147,34 @@ jobs:
           if ($deps -match 'Qt6|VCRUNTIME|MSVCP|api-ms-win-crt') {
             throw "the static exe still imports a Qt or MSVC runtime DLL:`n$($deps -join "`n")"
           }
+          # Logged so a jump in size (a stray Qt feature dragging icu back in) is visible
+          # in the run output instead of only in the download.
+          "exe size: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB)
 
       - uses: actions/upload-artifact@v4
         with:
           name: ida-workbench-${{ needs.meta.outputs.version }}-windows-x64
           path: ida-workbench-${{ needs.meta.outputs.version }}-windows-x64.exe
           if-no-files-found: error
+
+      # vcpkg reports only "BUILD_FAILED" and points at logs inside its buildtrees, which
+      # die with the runner. A failed run here costs hours, so the logs come home with it.
+      - name: Collect vcpkg logs
+        if: failure()
+        run: |
+          New-Item -ItemType Directory -Force vcpkg-logs | Out-Null
+          Get-ChildItem "$env:VCPKG_INSTALLATION_ROOT/buildtrees" -Recurse -Filter *.log -ErrorAction SilentlyContinue |
+            Select-Object -First 200 |
+            ForEach-Object { Copy-Item $_.FullName (Join-Path "vcpkg-logs" ($_.Directory.Name + "_" + $_.Name)) -ErrorAction SilentlyContinue }
+          Get-ChildItem vcpkg-logs -ErrorAction SilentlyContinue | Select-Object Name, Length
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: vcpkg-logs
+          path: vcpkg-logs
+          if-no-files-found: ignore
+          retention-days: 7
 
   release:
     name: Publish release
