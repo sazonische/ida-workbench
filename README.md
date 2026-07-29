@@ -201,7 +201,12 @@ The static build is a single self-contained exe: the QSS theme, the fonts, the i
 
 `.github/workflows/windows.yml` builds that static exe on GitHub Actions on every push, runs `ctest`, and produces one artifact: `ida-workbench-<version>-windows-x64.exe`. The packaging step asserts with `dumpbin` that it imports nothing but Windows system DLLs, and the python helpers are deliberately not shipped beside it — the exe carries them and writes them next to `config.json` itself. Qt is compiled from source by vcpkg, so the first run on a cold package cache takes hours while later runs restore the archives in minutes; the archives are saved even when a later step fails, so a broken test never costs a rebuild.
 
-Releases are driven by the version, not by hand: bump `project(VERSION)` in `CMakeLists.txt`, push to `main`, and the workflow tags that commit and publishes the exe under it. A version that already has a release is a no-op, so ordinary pushes publish nothing — which also means the version should be bumped when the work is ready to ship. Pushing a tag yourself still works; it just has to name the version the binaries report.
+Publishing never involves uploading a file by hand, and there are two ways in:
+
+- **Tag it.** Push a tag, or draft a release in the GitHub UI (which creates one). The tag *is* the version: the exe is built reporting it (`-DIDA_WORKBENCH_VERSION`) and attached to the release, creating the release first if only a tag exists. A release that is already there just receives the asset it is missing; assets already attached are never overwritten.
+- **Bump it.** Raise `project(VERSION)` in `CMakeLists.txt` and push to `main`; the workflow tags that commit and publishes it. A version that is already tagged is a green no-op, so ordinary pushes publish nothing.
+
+`project(VERSION)` stays the version for local builds and for anything built off a tag, so a tagged release never depends on remembering to edit a file.
 
 ## Tests
 

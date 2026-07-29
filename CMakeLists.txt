@@ -1,8 +1,11 @@
 cmake_minimum_required(VERSION 3.19)
 project(ida_workbench VERSION 1.3.0 LANGUAGES CXX)
 
-# Single source of truth for the app version: project(VERSION) -> generated header
-# (src/version.h in the build dir), shown in Settings ▸ About and the window footer.
+# The app version -> generated header (src/version.h in the build dir), shown in
+# Settings ▸ About and the window footer. project(VERSION) above is the default, used by
+# every local build; CI overrides it with the tag it is releasing, so a downloaded exe
+# always reports the version of the release it came in — no file edit per release.
+set(IDA_WORKBENCH_VERSION "${PROJECT_VERSION}" CACHE STRING "Version the app reports")
 configure_file(src/version.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.h" @ONLY)
 
 set(CMAKE_CXX_STANDARD 23)

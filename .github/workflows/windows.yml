@@ -33,15 +33,24 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      # CMakeLists is the single source of truth for the version (project(VERSION) ->
-      # version.h), so the artifact is named from it and never from the tag.
+      # On a tag, the tag *is* the version: it names the release, so the build reports it
+      # (-DIDA_WORKBENCH_VERSION) and the artifact is named after it. Releasing then never
+      # requires editing a file — create the tag (or the release) and CI follows. Off a
+      # tag, project(VERSION) from CMakeLists is the version, exactly as it is locally.
       - id: version
         shell: bash
         run: |
-          version=$(sed -nE 's/^project\(ida_workbench VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
-          if [ -z "$version" ]; then echo "project(VERSION ...) not found in CMakeLists.txt" >&2; exit 1; fi
+          declared=$(sed -nE 's/^project\(ida_workbench VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
+          if [ -z "$declared" ]; then echo "project(VERSION ...) not found in CMakeLists.txt" >&2; exit 1; fi
+          version="$declared"
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+            if [ "$version" != "$declared" ]; then
+              echo "::notice::building tag $GITHUB_REF_NAME as version $version; project(VERSION) still says $declared — the tag wins, syncing CMakeLists is optional"
+            fi
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "version $version"
+          echo "version $version (declared $declared, $GITHUB_REF_TYPE $GITHUB_REF_NAME)"
 
   build:
     name: Static exe
@@ -123,6 +132,7 @@ jobs:
           cmake -B build-static -A x64
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          "-DIDA_WORKBENCH_VERSION=${{ needs.meta.outputs.version }}"
 
       - name: Build
         run: cmake --build build-static --config Release
@@ -180,10 +190,12 @@ jobs:
 
   release:
     name: Publish release
-    # Releasing is driven by project(VERSION), never by hand: a push to main whose version
-    # has no release yet gets one, and `gh release create` creates the tag along with it.
-    # Bumping the version in CMakeLists.txt is therefore the whole release procedure — so
-    # bump it when the work is ready to ship, not while it is still in progress.
+    # Two ways in, and neither involves uploading a file by hand:
+    #   * tag it — push a tag, or draft a release in the UI (which creates one). The tag
+    #     names the version, the exe is built reporting it and attached, and a release that
+    #     already exists just gets the missing asset.
+    #   * bump it — raise project(VERSION) and push to main; the tag and the release are
+    #     created for you. A version that is already tagged is a green no-op.
     if: github.event_name == 'push'
     needs: [meta, build]
     runs-on: ubuntu-latest
@@ -201,26 +213,18 @@ jobs:
         run: |
           tag="$VERSION"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            # A hand-pushed tag must name the version the binaries report: the exe shows
-            # project(VERSION) in its footer and in Settings ▸ About, so a release named
-            # after anything else ships a binary that contradicts its own download page.
-            tag="$GITHUB_REF_NAME"
-            case "$tag" in
-              "$VERSION" | "v$VERSION") ;;
-              *)
-                echo "tag $tag names a version this commit does not build: project(VERSION) is $VERSION." >&2
-                echo "Do not tag by hand — bump project(VERSION) in CMakeLists.txt and push to main;" >&2
-                echo "the tag and the release are then created for you. Delete tag $tag to clean up." >&2
-                exit 1 ;;
-            esac
-          fi
-          existing_tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)
-          if [ "$GITHUB_REF_TYPE" = branch ] && [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$GITHUB_SHA" ]; then
-            # Releasing here would hang this build's exe off a tag pointing at other code,
-            # so the source archive and the binary would disagree.
-            echo "tag $tag already exists at ${existing_tag_sha:0:7}, but this build is ${GITHUB_SHA:0:7}." >&2
-            echo "Delete that tag (git push --delete origin $tag) or bump project(VERSION) again." >&2
-            exit 1
+            tag="$GITHUB_REF_NAME" # keeps a `v` prefix if that is how the tag was written
+          else
+            # Off a tag, a version that is already tagged is simply nothing to do — that is
+            # the state of every ordinary push after a release, so it must not read as a
+            # failure. Releasing over it would also hang this exe off a tag pointing at
+            # different code, making the source archive disagree with the binary.
+            existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)
+            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
+              echo "version $VERSION is already tagged at ${existing:0:7} — nothing to release."
+              echo "To ship this commit, tag it (or draft a release for it); the version comes from the tag."
+              exit 0
+            fi
           fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             # The release exists — most often because this version was already published, in
