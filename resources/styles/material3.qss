@@ -1,0 +1,273 @@
+/* Material 3 theme for IDA Workbench.
+ * %tokens% are substituted at runtime from the app's Material 3 light theme
+ * (see src/ui/theme.cpp). Keep this file free of C++ — it is pure QSS. */
+
+* {
+    font-family: 'Roboto Flex', 'Segoe UI', sans-serif;
+    font-size: 14px;
+}
+QWidget { color: %onSurface%; }
+QMainWindow, QDialog, QStackedWidget, #appSurface { background: %surface%; }
+
+/* --- top app bar --- */
+#appBar { background: %surface%; border: none; }
+#appTitle { font-size: 22px; font-weight: 600; color: %onSurface%; }
+#appSubtitle { color: %onSurfaceVariant%; font-size: 13px; }
+
+/* --- buttons: filled primary by default --- */
+QPushButton {
+    background: %primary%; color: %onPrimary%;
+    border: none; border-radius: 20px;
+    padding: 9px 22px; font-weight: 500; min-height: 22px;
+}
+QPushButton:hover   { background: %primaryHover%; }
+QPushButton:pressed { background: %primaryPressed%; }
+QPushButton:disabled { background: %disabledBg%; color: %disabledFg%; }
+#startButton { padding-left: 21px; padding-right: 21px; }
+QPushButton[actionPill="true"] { padding-left: 18px; padding-right: 18px; }
+
+/* tonal variant */
+QPushButton[variant="tonal"] { background: %secondaryContainer%; color: %onSecondaryContainer%; }
+QPushButton[variant="tonal"]:hover   { background: #DCCFF0; }
+QPushButton[variant="tonal"]:pressed { background: #D0C2E7; }
+
+/* Per-action toolbar tints so the four actions read apart at a glance.
+ * Scoped with :enabled so the shared QPushButton:disabled rule still greys them.
+ * MCP Start = soft green, Analyze = secondary (purple), Replace = tertiary (rose),
+ * Stop/Cancel = error (red). */
+#startButton:enabled  { background: #DDEDC6; color: #33691E; }
+#startButton:hover    { background: #D0E7B4; }
+#startButton:pressed  { background: #C4E0A1; }
+#analyzeBtn:enabled { background: #E8DEF8; color: #4A4459; }
+#analyzeBtn:hover   { background: #DCCFF0; }
+#analyzeBtn:pressed { background: #D0C2E7; }
+#replaceBtn:enabled   { background: #FFD8E4; color: #633B48; }
+#replaceBtn:hover     { background: #F6C7D6; }
+#replaceBtn:pressed   { background: #EFB8CC; }
+#stopBtn:enabled      { background: #F9DEDC; color: #B3261E; }
+#stopBtn:hover        { background: #F5D0CD; }
+#stopBtn:pressed      { background: #F0C0BC; }
+/* Disabled must beat the tonal tints: same specificity as QPushButton[variant="tonal"]
+ * but adding :disabled outranks it, so an unselected toolbar greys out completely. */
+QPushButton[variant="tonal"]:disabled { background: %disabledBg%; color: %disabledFg%; }
+
+/* text variant */
+QPushButton[variant="text"] { background: transparent; color: %primary%; padding: 9px 14px; }
+QPushButton[variant="text"]:hover   { background: #EADDFF; }
+QPushButton[variant="text"]:pressed { background: #DCCFF0; }
+
+/* outlined action, used by the settings footer */
+QPushButton[variant="outlined"] {
+    background: transparent; color: %primary%; border: 1px solid %outline%;
+}
+QPushButton[variant="outlined"]:hover { background: %hoverOverlay%; }
+
+/* Round icon-only buttons (toolbar utilities + log header) paint their own
+ * antialiased circle + state layer in C++ (Ui::RoundIconButton) — QSS radii are
+ * clipped through jagged 1-bit masks, so no rules are needed here. */
+
+/* --- tooltips --- */
+QToolTip {
+    background: %surfaceContainerHigh%; color: %onSurface%;
+    border: none; border-radius: 8px; padding: 6px 10px; font-size: 12px;
+}
+
+/* --- tables styled as an M3 card --- */
+QTableWidget {
+    background: %surfaceContainerLow%;
+    border: 1px solid transparent; border-radius: 16px;
+    gridline-color: transparent; outline: none; padding: 0;
+    alternate-background-color: transparent;
+}
+QTableWidget::item { padding: 8px; border: none; border-bottom: 1px solid #F1EBF5; }
+QHeaderView::section {
+    /* text colour is set per-section in code (updateSortHeaders) to signal sort state */
+    background: %surfaceContainerLow%;
+    border: none; border-bottom: 1px solid %outlineVariant%;
+    padding: 10px 8px; font-size: 12px; font-weight: 600;
+}
+QTableCornerButton::section { background: transparent; border: none; }
+
+/* --- log / text areas --- */
+QPlainTextEdit, QTextEdit {
+    background: %surfaceContainerLow%;
+    border: 1px solid %outlineVariant%; border-radius: 12px; padding: 8px;
+    font-family: 'Roboto Mono', Consolas, monospace; font-size: 12px;
+    color: %onSurface%;
+}
+
+/* --- inputs (M3 outlined) --- */
+QLineEdit, QSpinBox {
+    background: %surface%; color: %onSurface%;
+    border: 1px solid %outline%; border-radius: 8px; padding: 8px 12px;
+    selection-background-color: %primary%; selection-color: %onPrimary%;
+}
+QLineEdit:focus, QSpinBox:focus { border: 2px solid %primary%; }
+QLineEdit[invalid="true"] { border: 2px solid #E53935; }
+
+/* Shared Material 3 exposed dropdown. Construct through Ui::ComboBox/ComboField. */
+#materialField {
+    background: %surfaceContainerLow%; color: %primary%;
+    border: 1px solid %outline%; border-radius: 10px;
+    margin-top: 6px; padding: 1px 4px 2px 4px;
+    font-size: 11px; font-weight: 500;
+}
+#materialField::title {
+    subcontrol-origin: margin; subcontrol-position: top left;
+    left: 12px; padding: 0 5px;
+    background: %surface%; color: %primary%;
+}
+#materialField[expanded="true"] { background: transparent; border-color: transparent; }
+QComboBox#materialCombo {
+    min-height: 38px; padding: 0 12px;
+    background: transparent; color: %onSurface%;
+    border: none; border-radius: 7px; font-weight: 500;
+}
+QComboBox#materialCombo:hover { background: %hoverOverlay%; }
+QComboBox#materialCombo:focus { background: %secondaryContainer%; color: %onSecondaryContainer%; }
+QComboBox#materialCombo:disabled { color: %disabledFg%; background: transparent; }
+QComboBox#materialCombo::drop-down { width: 38px; border: none; background: transparent; }
+QComboBox#materialCombo::down-arrow { image: none; width: 0; height: 0; }
+QComboBox#materialCombo QAbstractItemView, QListView#materialComboPopup {
+    background: %surfaceContainerLow%; color: %onSurface%;
+    border: none; border-radius: 10px; padding: 5px; outline: none;
+    selection-background-color: %secondaryContainer%;
+    selection-color: %onSecondaryContainer%;
+}
+QComboBox#materialCombo QAbstractItemView::item, QListView#materialComboPopup::item {
+    min-height: 42px; padding: 0 14px; border: none; border-radius: 6px;
+}
+QComboBox#materialCombo QAbstractItemView::item:hover, QListView#materialComboPopup::item:hover {
+    background: %hoverOverlay%;
+}
+QComboBox#materialCombo QAbstractItemView::item:selected, QListView#materialComboPopup::item:selected {
+    background: %secondaryContainer%; color: %onSecondaryContainer%; font-weight: 500;
+}
+
+/* Floating-label fields from the HTML settings card. */
+#fieldBox {
+    background: %surfaceContainerLow%; border: 1px solid %outline%; border-radius: 10px;
+    margin-top: 6px; padding: 2px 8px; color: %primary%; font-size: 11px; font-weight: 500;
+}
+#fieldBox::title {
+    subcontrol-origin: margin; subcontrol-position: top left;
+    left: 12px; padding: 0 5px; background: %surfaceContainerLow%; color: %primary%;
+}
+#fieldBox QLineEdit {
+    border: none; border-radius: 0; padding: 2px; background: transparent;
+    color: %onSurface%; font-size: 13px;
+}
+#fieldBox QLineEdit:focus { border: none; }
+#fieldBox[invalid="true"] { border: 2px solid #B3261E; }
+#fieldBox QLineEdit[invalid="true"] { background: rgba(179,38,30,0.08); }
+
+/* in-cell / in-list editors — one reusable style for every item-view editor */
+QAbstractItemView { selection-background-color: %secondaryContainer%; selection-color: %onSecondaryContainer%; outline: none; }
+QAbstractItemView QLineEdit, QAbstractItemView QSpinBox {
+    border: 2px solid %primary%; border-radius: 6px; margin: 0; padding: 2px 8px;
+    background: %surfaceContainerHigh%; color: %onSurface%;
+    selection-background-color: %primary%; selection-color: %onPrimary%;
+    min-height: 22px;
+}
+QTableWidget::item:selected { background: %secondaryContainer%; color: %onSecondaryContainer%; }
+
+/* --- checkboxes / table check indicators (Material 3 tick) --- */
+QCheckBox::indicator, QTableWidget::indicator {
+    width: 18px; height: 18px; border-radius: 5px;
+    border: 2px solid %outline%; background: transparent;
+}
+QCheckBox::indicator:checked, QTableWidget::indicator:checked {
+    border: none; image: url(%checkImage%);
+}
+
+/* --- groupbox (settings sections shown as white cards) --- */
+QGroupBox {
+    background: %surfaceContainerLow%;
+    border: 1px solid %outlineVariant%; border-radius: 16px;
+    margin-top: 0; padding: 20px; font-weight: 600;
+}
+QGroupBox::title { subcontrol-origin: margin; left: 14px; padding: 0 4px; color: %onSurfaceVariant%; }
+#settingsCard { border: 1px solid transparent; }
+
+/* --- bottom footer: version + author credit --- */
+#appFooter { background: %surface%; border-top: 1px solid %outlineVariant%; }
+#footerText { color: %onSurfaceVariant%; font-size: 11px; background: transparent; }
+#footerText a { color: %primary%; text-decoration: none; }
+
+/* --- About card (settings) --- */
+#aboutText { color: %onSurfaceVariant%; font-size: 12px; background: transparent; }
+#aboutText a { color: %primary%; text-decoration: none; }
+
+/* --- log card --- */
+#logCard { background: %surfaceContainer%; border: none; border-radius: 16px; }
+#logCard QPlainTextEdit { background: transparent; border: none; padding: 0; }
+#logTitle { color: %primary%; font-size: 11px; font-weight: 700; background: transparent; }
+#iconChip { background: #EADDFF; border-radius: 16px; }
+#settingsFooter { background: %surface%; border-top: 1px solid %outlineVariant%; }
+QScrollArea, QScrollArea > QWidget > QWidget { background: %surface%; border: none; }
+
+/* --- segmented view switcher --- */
+#segmented { border: none; border-radius: 20px; background: transparent; }
+#segmented QPushButton { border: none; border-radius: 0; padding: 8px 18px; min-height: 20px; }
+#segmented QPushButton[variant="text"] { background: transparent; color: %onSurfaceVariant%; }
+#segmented QPushButton[variant="text"]:hover { background: #F7F1FB; }
+#segmented QPushButton[variant="tonal"] { background: %secondaryContainer%; color: #1D192B; }
+#segLeft { border-top-left-radius: 19px; border-bottom-left-radius: 19px; }
+#segRight { border-top-right-radius: 19px; border-bottom-right-radius: 19px; }
+
+QLabel { background: transparent; }
+
+/* --- MCP data dialog --- */
+#mcpTitle { font-size: 17px; font-weight: 600; color: %onSurface%; background: transparent; }
+#mcpInfo { background: %secondaryContainer%; border: none; border-radius: 12px; }
+#mcpInfoText { color: %onSecondaryContainer%; background: transparent; font-size: 12px; }
+#mcpInlineCode {
+    background: %surface%; color: %onSurface%; border-radius: 7px; padding: 5px 8px;
+    font-family: 'Roboto Mono', Consolas, monospace; font-size: 11px;
+}
+#mcpCode {
+    background: %surfaceContainerLow%; border: none; border-radius: 12px; padding: 12px;
+    font-family: 'Roboto Mono', Consolas, monospace; font-size: 12px; color: %onSurface%;
+    selection-background-color: %primary%; selection-color: %onPrimary%;
+}
+
+QTabWidget::pane { border: 1px solid %outlineVariant%; border-radius: 12px; top: -1px; }
+/* Text colour is set per-tab in code (setTabTextColor) so each tag keeps its own
+ * colour; leaving `color` out of the QSS lets that palette value win. */
+QTabBar::tab {
+    background: transparent;
+    padding: 7px 18px; border: 1px solid %outline%; margin: 2px 4px 2px 0;
+    border-radius: 17px; min-height: 18px; min-width: 72px; font-weight: 500;
+}
+QTabBar::tab:selected { background: %secondaryContainer%; border-color: %secondaryContainer%; font-weight: 500; }
+
+/* --- shared Material 3 popup menu (construct through Ui::Menu) --- */
+#materialMenu {
+    background: %surfaceContainerLow%; color: %onSurface%;
+    border: 1px solid %outlineVariant%; border-radius: 8px; padding: 6px;
+}
+#materialMenu::item { min-width: 176px; padding: 9px 12px; border-radius: 6px; }
+#materialMenu::item:selected { background: %secondaryContainer%; color: %onSecondaryContainer%; }
+#materialMenu::icon { padding-left: 6px; }
+#materialMenu::separator { height: 1px; background: %outlineVariant%; margin: 5px 8px; }
+
+/* --- lists --- */
+QListWidget {
+    background: %surfaceContainerLow%;
+    border: 1px solid transparent; border-radius: 10px; padding: 4px;
+}
+QListWidget::item { padding: 6px 10px; border-radius: 0; min-height: 24px; border-bottom: 1px solid %outlineVariant%; }
+QListWidget::item:selected { background: %secondaryContainer%; color: %onSecondaryContainer%; }
+
+/* --- slim scrollbars --- */
+QScrollBar:vertical   { background: transparent; width: 10px; margin: 2px; }
+QScrollBar:horizontal { background: transparent; height: 10px; margin: 2px; }
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {
+    background: %outline%; border-radius: 5px; min-height: 28px; min-width: 28px;
+}
+QScrollBar::add-line, QScrollBar::sub-line { height: 0; width: 0; }
+QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
+#tableOverlayScrollBar { background: transparent; width: 10px; margin: 2px; }
+#tableOverlayScrollBar::handle:vertical {
+    background: #CBC3D6; border: 2px solid #FFFFFF; border-radius: 5px; min-height: 28px;
+}

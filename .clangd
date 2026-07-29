@@ -1,0 +1,33 @@
+CompileFlags:
+  Add: ['-std=c++17', '/clang:-std=c++17']
+  # Use compile_commands.json from build directory
+  CompilationDatabase: build/
+Diagnostics:
+  ClangTidy:
+    Add:
+    [
+      bugprone-*, performance*, readability*,
+      modernize*, hicpp*
+    ]
+    Remove:
+    [
+      bugprone-easily-swappable-parameters, readability-implicit-bool-conversion, readability-static-accessed-through-instance,
+      readability-convert-member-functions-to-static, readability-qualified-auto, readability-identifier-length,
+      readability-magic-numbers, modernize-use-trailing-return-type, modernize-use-designated-initializers,
+      modernize-use-nodiscard, modernize-use-default-member-init, hicpp-vararg,
+      hicpp-signed-bitwise, hicpp-special-member-functions
+    ]
+    CheckOptions:
+      readability-identifier-naming.FunctionCase: CamelCase
+      readability-identifier-naming.VariableCase: camelBack
+      readability-identifier-naming.ParameterCase: camelBack
+      readability-identifier-naming.NamespaceCase: CamelCase
+      readability-identifier-naming.ClassCase: CamelCase
+      readability-identifier-naming.StructCase: CamelCase
+      readability-identifier-naming.EnumCase: CamelCase
+      readability-identifier-naming.EnumConstantCase: UPPER_SNAKE_CASE
+      readability-identifier-naming.GlobalConstantCase: UPPER_SNAKE_CASE
+      readability-identifier-naming.LocalConstantCase: UPPER_SNAKE_CASE
+      readability-identifier-naming.ConstantCase: UPPER_SNAKE_CASE
+      readability-identifier-naming.IgnoreMainLikeFunctions: 'true'
+      readability-static-accessed-through-instance.NameSpecifierNestingThreshold: '3'

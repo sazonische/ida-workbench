@@ -1,0 +1,155 @@
+name: Windows
+
+# One build, one artifact: the self-contained static exe. vcpkg compiles a static Qt from
+# source, so the first run on a cold package cache is measured in hours while every later
+# run restores the archives in minutes — which is why the archives are saved even when a
+# later step fails (see "Save vcpkg packages").
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a tag build half-way through: its artifact becomes a release.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  meta:
+    name: Project version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # CMakeLists is the single source of truth for the version (project(VERSION) ->
+      # version.h), so the artifact is named from it and never from the tag.
+      - id: version
+        shell: bash
+        run: |
+          version=$(sed -nE 's/^project\(ida_workbench VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
+          if [ -z "$version" ]; then echo "project(VERSION ...) not found in CMakeLists.txt" >&2; exit 1; fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "version $version"
+
+  build:
+    name: Static exe
+    needs: meta
+    runs-on: windows-2025
+    timeout-minutes: 360 # a cold qtbase build is measured in hours, not minutes
+    steps:
+      - uses: actions/checkout@v4
+
+      # The cache holds vcpkg's built package archives, not its source tree: a different
+      # vcpkg commit means different port versions, which invalidates every archive. The
+      # runner image bumps its vcpkg every few weeks, so restore-keys let a stale cache
+      # still seed the rebuild instead of starting from nothing.
+      - name: Resolve vcpkg revision
+        id: vcpkg
+        run: |
+          $sha = git -C "$env:VCPKG_INSTALLATION_ROOT" rev-parse HEAD
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: Restore vcpkg packages
+        id: vcpkg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg-archives
+          key: vcpkg-qtbase-static-${{ steps.vcpkg.outputs.sha }}-${{ hashFiles('.github/vcpkg-triplets/*.cmake') }}
+          restore-keys: vcpkg-qtbase-static-
+
+      - name: Build static Qt
+        env:
+          VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-archives
+        run: |
+          New-Item -ItemType Directory -Force $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          & "$env:VCPKG_INSTALLATION_ROOT/vcpkg.exe" install qtbase:x64-windows-static `
+            "--overlay-triplets=${{ github.workspace }}/.github/vcpkg-triplets"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install failed ($LASTEXITCODE)" }
+
+      # Saved right after the expensive step and regardless of what follows: hours of
+      # qtbase build must not be discarded because a test broke afterwards. Skipped on an
+      # exact hit — there is nothing new to store then.
+      - name: Save vcpkg packages
+        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ github.workspace }}/vcpkg-archives
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      # No -G: on Windows CMake picks the newest installed Visual Studio generator, so the
+      # workflow keeps working when the runner image moves to a newer VS. The overlay is
+      # not repeated here: in classic mode the toolchain only consumes the installed tree,
+      # and passing it would just raise an unused-variable warning.
+      - name: Configure
+        run: >
+          cmake -B build-static -A x64
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DVCPKG_TARGET_TRIPLET=x64-windows-static
+
+      - name: Build
+        run: cmake --build build-static --config Release
+
+      - name: Test
+        run: ctest --test-dir build-static -C Release --output-on-failure
+
+      # One file, nothing beside it. The python helpers are compiled into the exe and
+      # unpacked next to config.json on launch, where ensureHelperScripts also refreshes
+      # them; shipping copies here would only pin _scriptDir to the download folder, where
+      # they are never refreshed and can silently outlive the exe that runs them.
+      - name: Package
+        run: |
+          $exe = "ida-workbench-${{ needs.meta.outputs.version }}-windows-x64.exe"
+          Copy-Item build-static/Release/ida-workbench.exe $exe
+          # "Static" is a claim worth checking: the whole point of this artifact is that it
+          # needs nothing but Windows system DLLs beside it. dumpbin lives in the MSVC
+          # toolchain, which is not on PATH outside a developer prompt.
+          $vsRoot = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+          $dumpbin = Get-ChildItem "$vsRoot\VC\Tools\MSVC\*\bin\Hostx64\x64\dumpbin.exe" |
+            Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $dumpbin) { throw "dumpbin not found under $vsRoot" }
+          $deps = & $dumpbin.FullName /dependents $exe
+          if ($deps -match 'Qt6|VCRUNTIME|MSVCP|api-ms-win-crt') {
+            throw "the static exe still imports a Qt or MSVC runtime DLL:`n$($deps -join "`n")"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ida-workbench-${{ needs.meta.outputs.version }}-windows-x64
+          path: ida-workbench-${{ needs.meta.outputs.version }}-windows-x64.exe
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [meta, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Create release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The tag must agree with project(VERSION): a release named after a version the
+          # binaries do not report is worse than no release.
+          if [ "$GITHUB_REF_NAME" != "v${{ needs.meta.outputs.version }}" ]; then
+            echo "tag $GITHUB_REF_NAME does not match project version ${{ needs.meta.outputs.version }}" >&2
+            exit 1
+          fi
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" \
+            --title "IDA Workbench $GITHUB_REF_NAME" --generate-notes \
+            artifacts/*/*
