@@ -201,19 +201,41 @@ jobs:
         run: |
           tag="$VERSION"
           if [ "$GITHUB_REF_TYPE" = tag ]; then
-            # A hand-pushed tag must name the version the binaries report: a release named
-            # after a version nothing reports is worse than no release.
+            # A hand-pushed tag must name the version the binaries report: the exe shows
+            # project(VERSION) in its footer and in Settings ▸ About, so a release named
+            # after anything else ships a binary that contradicts its own download page.
             tag="$GITHUB_REF_NAME"
             case "$tag" in
               "$VERSION" | "v$VERSION") ;;
-              *) echo "tag $tag does not match project version $VERSION" >&2; exit 1 ;;
+              *)
+                echo "tag $tag names a version this commit does not build: project(VERSION) is $VERSION." >&2
+                echo "Do not tag by hand — bump project(VERSION) in CMakeLists.txt and push to main;" >&2
+                echo "the tag and the release are then created for you. Delete tag $tag to clean up." >&2
+                exit 1 ;;
             esac
           fi
-          # An existing release is left untouched, so every push to main after a release is
-          # a no-op until the version changes — and a published asset is never rewritten
-          # behind your back.
+          existing_tag_sha=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)
+          if [ "$GITHUB_REF_TYPE" = branch ] && [ -n "$existing_tag_sha" ] && [ "$existing_tag_sha" != "$GITHUB_SHA" ]; then
+            # Releasing here would hang this build's exe off a tag pointing at other code,
+            # so the source archive and the binary would disagree.
+            echo "tag $tag already exists at ${existing_tag_sha:0:7}, but this build is ${GITHUB_SHA:0:7}." >&2
+            echo "Delete that tag (git push --delete origin $tag) or bump project(VERSION) again." >&2
+            exit 1
+          fi
           if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $tag already exists — nothing to publish"
+            # The release exists — most often because this version was already published, in
+            # which case there is nothing to do. But a release created by hand can sit there
+            # with no binary attached, and silently leaving it empty is the worse outcome, so
+            # missing assets are filled in. Existing ones are never overwritten.
+            attached=" $(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | tr '\n' ' ') "
+            for file in artifacts/*/*; do
+              name=$(basename "$file")
+              case "$attached" in
+                *" $name "*) echo "release $tag already carries $name" ;;
+                *) echo "attaching $name to existing release $tag"
+                   gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$file" ;;
+              esac
+            done
             exit 0
           fi
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
