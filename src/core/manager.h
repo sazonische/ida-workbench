@@ -171,6 +171,10 @@ public slots:
 	void UpdateDepot(const QStringList& tags, const QString& manifest, const QString& username = {},
 		const QString& password = {}, const QString& authCode = {}, bool rememberSession = false);
 	void SetStoredVersion(const QString& tag, const QString& version);
+	// Ask GitHub for the newest release. Emits UpdateAvailable only when it is newer than
+	// the running build; everything else (offline, rate limit, malformed answer) is a log
+	// line, because a background check must never look like a problem with the app.
+	void CheckForUpdate();
 	void SaveConfig(const ConfigView& v);
 	void ImportConfig(const QString& sourcePath); // replace config.json with an external file
 
@@ -183,10 +187,12 @@ signals:
 	void WorkspaceOperationChanged(const QString& tag, const QString& operation, bool active);
 	void ConfigLoaded(const ConfigView& v);
 	void ConfigSaveFinished(bool ok, const QString& message);
+	void UpdateAvailable(const QString& version, const QString& releaseUrl);
 	void ReadinessChanged(const Readiness& r);
 
 private:
 	Readiness ComputeReadiness() const;
+	void FinishUpdateCheck(const QByteArray& releaseJson); // parse + compare, once the reply is in
 
 	QString _host;
 	QString _idaGui, _idaText;
@@ -211,6 +217,7 @@ private:
 	QSet<QString> _depotTags;
 
 	std::atomic<bool> _stopDepotRequested{false}; // polled while DepotDownloader is running
+	bool _updateCheckInFlight = false;			  // one release query at a time
 
 	QString _configPath;
 

@@ -266,9 +266,13 @@ void TagDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, c
 	painter->restore();
 }
 
+PortOffsetDelegate::PortOffsetDelegate(QObject* parent, int minimum, int maximum) :
+	QStyledItemDelegate(parent), _minimum(minimum), _maximum(maximum) {
+}
+
 QWidget* PortOffsetDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex&) const {
 	auto* editor = new QSpinBox(parent);
-	editor->setRange(-60000, 65535);					   // tag offsets (can be negative) + absolute ports
+	editor->setRange(_minimum, _maximum);
 	editor->setButtonSymbols(QAbstractSpinBox::NoButtons); // no up/down arrows — type the value
 	editor->setFrame(false);
 	return editor;

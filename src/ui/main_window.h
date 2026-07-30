@@ -54,6 +54,7 @@ signals:
 	void RequestSaveConfig(const ConfigView& v);
 	void RequestImportConfig(const QString& sourcePath);
 	void RequestStoredVersion(const QString& tag, const QString& version);
+	void RequestUpdateCheck();
 
 private slots:
 	void OnStatus(const QVector<LibRow>& rows);
@@ -65,6 +66,7 @@ private slots:
 	void OnWorkspaceOperationChanged(const QString& tag, const QString& operation, bool active);
 	void OnConfigLoaded(const ConfigView& v);
 	void OnReadiness(const Readiness& r);
+	void OnUpdateAvailable(const QString& version, const QString& releaseUrl);
 	void DoStart();
 	void DoOpenIda();
 	void DoStop();

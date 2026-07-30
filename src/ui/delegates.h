@@ -45,10 +45,18 @@ public:
 class PortOffsetDelegate : public QStyledItemDelegate {
 	Q_OBJECT
 public:
-	using QStyledItemDelegate::QStyledItemDelegate;
+	// Defaults suit a tag's port offset, which may be negative. A column holding an
+	// absolute port passes 1024..65535 instead: below 1024 needs privileges Workbench
+	// does not have, and validateConfig cannot tighten that rule without rejecting
+	// configs that already load.
+	explicit PortOffsetDelegate(QObject* parent = nullptr, int minimum = -60000, int maximum = 65535);
 	QWidget* createEditor(QWidget* parent, const QStyleOptionViewItem& option, const QModelIndex& index) const override;
 	void setEditorData(QWidget* editor, const QModelIndex& index) const override;
 	void setModelData(QWidget* editor, QAbstractItemModel* model, const QModelIndex& index) const override;
+
+private:
+	int _minimum;
+	int _maximum;
 };
 
 // Keeps the trailing cell background full-width while moving only its content

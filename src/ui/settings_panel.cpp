@@ -161,7 +161,8 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	detectBtn->setToolTip("Search the usual install locations for ida / idat and fill the paths above");
 	idaLay->addLayout(BtnRow({detectBtn}));
 	connect(detectBtn, &QPushButton::clicked, this, [this] {
-		QString guiPath, textPath;
+		QString guiPath;
+		QString textPath;
 		if (AutoDetectIda(&guiPath, &textPath)) {
 			_gui->setText(guiPath);
 			_text->setText(textPath);
@@ -194,24 +195,11 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 							   "single libraries get base port + 1000 + their index. Any individual port can be "
 							   "changed on the main page (double-click the Port cell)."));
 
-	// --- workspaces ---
-	srvLay->addWidget(SectionHeader("dns", "Server & analysis", "— host address and port allocation"));
-
-	_host = new QLineEdit(v.host);
-	_basePort = new QLineEdit(QString::number(v.basePort));
-	_maxLog = new QLineEdit(QString::number(v.maxLogMB));
-	_analysisArgs = new QLineEdit(v.analysisArgs);
-
-	auto* portLay = new QHBoxLayout;
-	portLay->addWidget(OutlinedField("Listen host", _host));
-	portLay->addWidget(OutlinedField("Base port", _basePort));
-	srvLay->addLayout(portLay);
-	srvLay->addWidget(OutlinedField("Batch analysis arguments", _analysisArgs));
-
-	// DepotDownloader card
-	_depotExecutable = new QLineEdit(v.depotDownloader.executable);
-	_depotTimeout = new QLineEdit(QString::number(v.depotDownloader.timeoutMinutes));
-
+	// One field per setting: every widget is created once above, with its validator, and shown
+	// exactly once. Re-creating them here (as an earlier layout did) left the first copies on
+	// screen but unreachable from Values() — edits in them were silently dropped, and the
+	// validators went with the discarded pointers.
+	srvLay->addWidget(SectionHeader("download", "DepotDownloader", "— the tool Steam workspaces download with"));
 	auto* depotLay = new QHBoxLayout;
 	depotLay->addWidget(BrowseRow("DepotDownloader", _depotExecutable, this, false, "Select DepotDownloader executable"), 1);
 	auto* timeoutField = OutlinedField("Timeout (minutes)", _depotTimeout);
@@ -248,7 +236,7 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 		if (c == 3) {
 			EditFiles(_workspaces, r);
 		} else if (c == 5) {
-			PickTagColor(r);
+			PickTagColor(_workspaces, r, c);
 		}
 	});
 
@@ -297,7 +285,7 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 		if (c == 2) {
 			EditFiles(_steamWorkspaces, r);
 		} else if (c == 5) {
-			PickTagColor(r);
+			PickTagColor(_steamWorkspaces, r, c);
 		}
 	});
 	connect(_steamWorkspaces, &QTableWidget::cellDoubleClicked, this, [this](int r, int c) {
@@ -340,10 +328,10 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	_extra->horizontalHeader()->setFixedHeight(40);
 	_extra->setMinimumHeight(110);
 	_extra->verticalHeader()->setDefaultSectionSize(40);
-	_extra->setItemDelegateForColumn(2, new PortOffsetDelegate(_extra));
+	_extra->setItemDelegateForColumn(2, new PortOffsetDelegate(_extra, 1024, 65535)); // absolute port, not an offset
 	connect(_extra, &QTableWidget::cellClicked, this, [this](int r, int c) {
 		if (c == 3) {
-			PickExtraColor(r);
+			PickTagColor(_extra, r, c);
 		}
 	});
 	for (const ExtraLib& e : v.extraLibs) {
@@ -524,12 +512,15 @@ void SettingsPanel::AddSteamWorkspaceRow(const Workspace& workspace) {
 	_steamWorkspaces->setItem(r, 5, col);
 }
 
-void SettingsPanel::PickTagColor(int row) {
-	auto* item = _workspaces->item(row, 5);
+// Takes the table it was clicked in: three tables share this, and hardcoding one of them
+// silently repainted the wrong workspace's colour (and did nothing at all for rows the
+// hardcoded table did not have).
+void SettingsPanel::PickTagColor(QTableWidget* table, int row, int column) {
+	auto* item = table->item(row, column);
 	if (!item) {
 		return;
 	}
-	const QString tag = _workspaces->item(row, 0) ? _workspaces->item(row, 0)->text() : QString();
+	const QString tag = table->item(row, 0) ? table->item(row, 0)->text() : QString();
 	const QString currentHex = item->data(Qt::UserRole).toString();
 	const QColor initialColor = currentHex.isEmpty() ? Pal::AutoTagBg(tag) : QColor(currentHex);
 	const QColor selectedColor = QColorDialog::getColor(initialColor, this, "Tag colour");
@@ -593,21 +584,6 @@ void SettingsPanel::AddExtraRow(const ExtraLib& extraLib) {
 	auto* col = new QTableWidgetItem;
 	ApplyTagSwatch(col, extraLib.tag, extraLib.color);
 	_extra->setItem(r, 3, col);
-}
-
-void SettingsPanel::PickExtraColor(int row) {
-	auto* item = _extra->item(row, 3);
-	if (!item) {
-		return;
-	}
-	const QString tag = _extra->item(row, 0) ? _extra->item(row, 0)->text() : QString();
-	const QString currentHex = item->data(Qt::UserRole).toString();
-	const QColor initialColor = currentHex.isEmpty() ? Pal::AutoTagBg(tag) : QColor(currentHex);
-	const QColor selectedColor = QColorDialog::getColor(initialColor, this, "Tag colour");
-	if (!selectedColor.isValid()) {
-		return;
-	}
-	ApplyTagSwatch(item, tag, selectedColor.name());
 }
 
 // Edit the relative file paths of one workspace.
@@ -812,7 +788,13 @@ ConfigView SettingsPanel::Values() const {
 	view.analysisArgs = _analysisArgs->text().trimmed();
 	view.configPath = _configPath; // informational — SaveConfig never moves the file
 	view.depotDownloader.executable = _depotExecutable->text().trimmed();
-	view.depotDownloader.timeoutMinutes = _depotTimeout->text().trimmed().toInt();
+	{
+		// An empty or unparsable field must keep the default, not fall through to 0 —
+		// SaveConfig clamps that to a 1-minute timeout, which kills real downloads.
+		bool ok = false;
+		const int minutes = _depotTimeout->text().trimmed().toInt(&ok);
+		view.depotDownloader.timeoutMinutes = ok ? minutes : 30;
+	}
 	{
 		bool ok = false;
 		const int mb = _maxLog->text().trimmed().toInt(&ok);

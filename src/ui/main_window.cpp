@@ -95,8 +95,11 @@ namespace {
 	class NumericItem final : public QTableWidgetItem {
 	public:
 		bool operator<(const QTableWidgetItem& other) const override {
-			const QVariant a = data(Qt::UserRole), b = other.data(Qt::UserRole);
-			if (a.isValid() && b.isValid()) return a.toLongLong() < b.toLongLong();
+			const QVariant a = data(Qt::UserRole);
+			const QVariant b = other.data(Qt::UserRole);
+			if (a.isValid() && b.isValid()) {
+				return a.toLongLong() < b.toLongLong();
+			}
 			return QTableWidgetItem::operator<(other);
 		}
 	};
@@ -110,8 +113,10 @@ namespace {
 			setAttribute(Qt::WA_TranslucentBackground);
 		}
 
-		void setCheckState(Qt::CheckState state) {
-			if (_state == state) return;
+		void SetCheckState(Qt::CheckState state) {
+			if (_state == state) {
+				return;
+			}
 			_state = state;
 			update();
 		}
@@ -146,25 +151,25 @@ namespace {
 	public:
 		explicit SelectHeader(Qt::Orientation orientation, QWidget* parent = nullptr) :
 			TrailingInsetHeader(orientation, parent), _checkBox(new HeaderCheckBox(viewport())) {
-			connect(this, &QHeaderView::geometriesChanged, this, [this] { positionCheckBox(); });
-			connect(this, &QHeaderView::sectionResized, this, [this](int, int, int) { positionCheckBox(); });
+			connect(this, &QHeaderView::geometriesChanged, this, [this] { PositionCheckBox(); });
+			connect(this, &QHeaderView::sectionResized, this, [this](int, int, int) { PositionCheckBox(); });
 			_checkBox->raise();
 		}
 
-		void setCheckState(Qt::CheckState state) { _checkBox->setCheckState(state); }
-		void setSelectionEnabled(bool enabled) { _checkBox->setEnabled(enabled); }
-		void setToggleHandler(std::function<void()> handler) {
+		void SetCheckState(Qt::CheckState state) { _checkBox->SetCheckState(state); }
+		void SetSelectionEnabled(bool enabled) { _checkBox->setEnabled(enabled); }
+		void SetToggleHandler(std::function<void()> handler) {
 			connect(_checkBox, &QAbstractButton::clicked, this, [handler = std::move(handler)] { handler(); });
 		}
 
 	protected:
 		void resizeEvent(QResizeEvent* event) override {
 			QHeaderView::resizeEvent(event);
-			positionCheckBox();
+			PositionCheckBox();
 		}
 
 	private:
-		void positionCheckBox() {
+		void PositionCheckBox() {
 			// QTableWidget indicators sit 6 px left of the geometric section centre
 			// because the item delegate reserves leading content padding. Match that
 			// visual axis so the header and every row form one straight column.
@@ -240,7 +245,10 @@ namespace {
 					setFormat(int(m.capturedStart()), int(m.capturedLength()), fmt);
 				}
 			};
-			const QColor punct("#79747E"), key("#8250DF"), str("#0B57D0"), url("#0B7B83");
+			const QColor punct("#79747E");
+			const QColor key("#8250DF");
+			const QColor str("#0B57D0");
+			const QColor url("#0B7B83");
 			if (_mode == Json) {
 				apply("[{}\\[\\],:]", punct);
 				apply("\"[^\"]*\"", str);		   // strings (values first)
@@ -269,8 +277,11 @@ namespace {
 	protected:
 		void mouseDoubleClickEvent(QMouseEvent*) override {
 			auto* sp = splitter();
-			if (!sp || sp->count() < 2) return;
-			const int lo = sp->count() - 2, hi = sp->count() - 1; // table, log
+			if (!sp || sp->count() < 2) {
+				return;
+			}
+			const int lo = sp->count() - 2; // table
+			const int hi = sp->count() - 1; // log
 			QList<int> sizes = sp->sizes();
 			const int total = sizes.value(lo) + sizes.value(hi);
 			int want;
@@ -279,7 +290,9 @@ namespace {
 				want = 0;
 			} else { // restore it to its remembered height (or a sensible default)
 				want = sp->property("restoreSize").toInt();
-				if (want <= 0) want = 130;
+				if (want <= 0) {
+					want = 130;
+				}
 				want = qBound(60, want, qMax(60, total - 120));
 			}
 			sizes[hi] = want;
@@ -302,7 +315,8 @@ namespace {
 			p.setRenderHint(QPainter::Antialiasing);
 			p.setPen(Qt::NoPen);
 			p.setBrush(_hot ? Pal::PRIMARY : Pal::DIVIDER);
-			const qreal w = 36, h = 4;
+			const qreal w = 36;
+	const qreal h = 4;
 			p.drawRoundedRect(QRectF((width() - w) / 2.0, (height() - h) / 2.0, w, h), h / 2, h / 2);
 		}
 
@@ -320,7 +334,7 @@ namespace {
 
 } // namespace
 
-static QString mb(qint64 n) {
+static QString FormatMegabytes(qint64 n) {
 	return n < 0 ? QStringLiteral("—") : QString::number(n / 1048576.0, 'f', 2) + " MB";
 }
 static QString RowKey(const QString& name, const QString& tag) { return name + "\t" + tag; }
@@ -334,19 +348,26 @@ static QString PrettyRevision(const QString& revision) {
 }
 static QString PrettyManifest(const QString& output, const QString& manifest) {
 	QFile inf(QDir(output).filePath(manifest + "/csgo/steam.inf"));
-	if (!inf.open(QIODevice::ReadOnly | QIODevice::Text)) return manifest;
+	if (!inf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+		return manifest;
+	}
 	const QString text = QString::fromUtf8(inf.readAll());
 	auto value = [&text](const QString& key) {
 		return QRegularExpression(QString("(?mi)^\\s*%1\\s*=\\s*([^\\r\\n]+)").arg(QRegularExpression::escape(key))).match(text).captured(1).trimmed();
 	};
-	const QString patch = value("PatchVersion"), server = value("ServerVersion");
+	const QString patch = value("PatchVersion");
+	const QString server = value("ServerVersion");
 	QStringList parts{manifest};
-	if (!patch.isEmpty()) parts << "Patch " + patch;
-	if (!server.isEmpty()) parts << "Server " + server;
+	if (!patch.isEmpty()) {
+		parts << "Patch " + patch;
+	}
+	if (!server.isEmpty()) {
+		parts << "Server " + server;
+	}
 	return parts.join(QStringLiteral(" \u00b7 "));
 }
 // Live elapsed time for the Analyzing… / Starting… cell: m:ss (mm:ss past ten minutes).
-static QString fmtElapsed(qint64 ms) {
+static QString FormatElapsed(qint64 ms) {
 	const qint64 s = ms / 1000;
 	return QString("%1:%2").arg(s / 60).arg(s % 60, 2, 10, QChar('0'));
 }
@@ -360,16 +381,30 @@ static QIcon SpunRefreshIcon(int angle) { return Ui::SpinningIcon("refresh", 20,
 
 // config.json always lives in the user's data folder so it survives rebuilds and
 // app updates and there is exactly one place to look.
-static QString userConfigHome() { return QDir::homePath() + "/.ida-workbench"; }
-static QString configPath() { return QDir(userConfigHome()).filePath("config.json"); }
+static QString UserConfigHome() { return QDir::homePath() + "/.ida-workbench"; }
+static QString ConfigFilePath() { return QDir(UserConfigHome()).filePath("config.json"); }
 
 // Pure-UI layout preferences (splitter position, …) live in their own small file
 // next to config.json, so resizing a panel never rewrites the app configuration.
-static QString uiStatePath() { return QDir(userConfigHome()).filePath("ui-state.json"); }
-static QJsonObject readUiState() {
-	QFile f(uiStatePath());
-	if (!f.open(QIODevice::ReadOnly)) return {};
+static QString UiStatePath() { return QDir(UserConfigHome()).filePath("ui-state.json"); }
+static QJsonObject ReadUiState() {
+	QFile f(UiStatePath());
+	if (!f.open(QIODevice::ReadOnly)) {
+		return {};
+	}
 	return QJsonDocument::fromJson(f.readAll()).object();
+}
+
+// Read-modify-write, so one setting never drops the others (the file also carries the
+// splitter layout and the declined update).
+static void StoreUiState(const QString& key, const QJsonValue& value) {
+	QJsonObject state = ReadUiState();
+	state[key] = value;
+	QSaveFile f(UiStatePath());
+	if (f.open(QIODevice::WriteOnly)) {
+		f.write(QJsonDocument(state).toJson(QJsonDocument::Compact));
+		f.commit();
+	}
 }
 
 MainWindow::MainWindow(QWidget* parent) :
@@ -485,8 +520,9 @@ MainWindow::MainWindow(QWidget* parent) :
 	_replaceBtn->setIcon(Ui::Icon("swap_horiz", Pal::REPLACE_FG, 18));
 	_depotBtn->setIcon(Ui::Icon("download", Pal::PRIMARY, 18));
 	_stopBtn->setIcon(Ui::Icon("stop", Pal::STOP_FG, 18, true));
-	for (QPushButton* button : {_openIdaBtn, _stopBtn, _analyzeBtn, _replaceBtn, _depotBtn})
+	for (QPushButton* button : {_openIdaBtn, _stopBtn, _analyzeBtn, _replaceBtn, _depotBtn}) {
 		button->setProperty("actionPill", true);
+	}
 	// Action tooltips are selection-dependent and owned by UpdateActionButtons().
 	_startBtn->setAutoDefault(false);
 	_startBtn->setDefault(false);
@@ -517,7 +553,7 @@ MainWindow::MainWindow(QWidget* parent) :
 
 	_table = new OverlayTableWidget(0, COL_COUNT);
 	auto* selectHeader = new SelectHeader(Qt::Horizontal, _table);
-	selectHeader->setToggleHandler([this] { ToggleAll(); });
+	selectHeader->SetToggleHandler([this] { ToggleAll(); });
 	_table->setHorizontalHeader(selectHeader);
 	_table->setHorizontalHeaderLabels({"", "Module", "Tag", "Server", "Port", "Status", "Size", "Sync", ""});
 	_table->horizontalHeaderItem(COL_SEL)->setToolTip("Select all visible modules");
@@ -547,7 +583,9 @@ MainWindow::MainWindow(QWidget* parent) :
 	_table->horizontalHeaderItem(COL_SIZE)->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
 	_table->horizontalHeaderItem(COL_DELTA)->setTextAlignment(Qt::AlignCenter);
 	connect(_table, &QTableWidget::cellClicked, this, [this](int row, int col) {
-		if (col == COL_SEL || col == COL_PORT) return; // Port: double-click to edit
+		if (col == COL_SEL || col == COL_PORT) {
+			return; // Port: double-click to edit
+		}
 		auto* it = _table->item(row, COL_SEL);
 		if (it) {
 			it->setCheckState(it->checkState() == Qt::Checked ? Qt::Unchecked : Qt::Checked);
@@ -556,7 +594,9 @@ MainWindow::MainWindow(QWidget* parent) :
 		}
 	});
 	connect(_table, &QTableWidget::cellDoubleClicked, this, [this](int row, int col) {
-		if (col == COL_PORT) EditPort(row);
+		if (col == COL_PORT) {
+			EditPort(row);
+		}
 	});
 	connect(_table, &QWidget::customContextMenuRequested, this, &MainWindow::ShowLibraryContextMenu);
 	// Custom sorting: no arrow indicator; a header click cycles that column
@@ -565,10 +605,11 @@ MainWindow::MainWindow(QWidget* parent) :
 	_table->horizontalHeader()->setSortIndicatorShown(false);
 	_table->horizontalHeader()->setSectionsClickable(true);
 	connect(_table->horizontalHeader(), &QHeaderView::sectionClicked, this, [this](int column) {
-		if (column == COL_SEL)
+		if (column == COL_SEL) {
 			ToggleAll();
-		else
+		} else {
 			CycleSort(column);
+		}
 	});
 	connect(_table, &QTableWidget::itemChanged, this, [this](QTableWidgetItem* item) {
 		if (item && item->column() == COL_SEL) {
@@ -599,7 +640,9 @@ MainWindow::MainWindow(QWidget* parent) :
 	auto* openLogBtn = Ui::RoundIconButton("folder_open", "Open the log folder", Pal::ON_SURFACE_VARIANT, Pal::ON_SURFACE_VARIANT, 28, 16);
 	connect(openLogBtn, &QPushButton::clicked, this, [] {
 		const QString p = Log::Path();
-		if (!p.isEmpty()) QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(p).absolutePath()));
+		if (!p.isEmpty()) {
+			QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(p).absolutePath()));
+		}
 	});
 	logHead->addWidget(openLogBtn);
 	logLay->addLayout(logHead);
@@ -652,11 +695,12 @@ MainWindow::MainWindow(QWidget* parent) :
 	content->addWidget(_logSplitter, 1);
 
 	// Restore the last dragged layout (falls back to a comfortable default height).
-	const QByteArray splitterState = QByteArray::fromBase64(readUiState().value("logSplitter").toString().toLatin1());
-	if (!splitterState.isEmpty())
+	const QByteArray splitterState = QByteArray::fromBase64(ReadUiState().value("logSplitter").toString().toLatin1());
+	if (!splitterState.isEmpty()) {
 		_logSplitter->restoreState(splitterState);
-	else
+	} else {
 		_logSplitter->setSizes({640, 130});
+	}
 
 	_stack = new QStackedWidget;
 	_stack->addWidget(_mainPage); // page 0 = main (list/tabs)
@@ -690,20 +734,22 @@ MainWindow::MainWindow(QWidget* parent) :
 
 	_mgr = new Manager;
 	QString err;
-	const QString cfg = configPath();
+	const QString cfg = ConfigFilePath();
 	// First run (or the file was deleted): write a clean, loadable default so the
 	// app opens ready to edit instead of failing. IDA is auto-detected if present.
 	if (!QFile::exists(cfg)) {
 		QString createErr;
-		if (_mgr->CreateDefaultConfig(cfg, &createErr))
+		if (_mgr->CreateDefaultConfig(cfg, &createErr)) {
 			OnLog("created a clean config: " + QDir::toNativeSeparators(cfg));
-		else
+		} else {
 			OnLog("could not create a clean config: " + createErr);
+		}
 	}
-	if (!_mgr->LoadConfig(cfg, &err))
+	if (!_mgr->LoadConfig(cfg, &err)) {
 		QMessageBox::critical(this, "Config error", QString("Failed to load %1\n\n%2\n\nOpen Settings to fix the paths.").arg(cfg, err));
-	else
+	} else {
 		OnLog("config: " + QDir::toNativeSeparators(cfg));
+	}
 	_cfg = _mgr->View();
 	RecomputeModel();
 	BuildTable();
@@ -724,14 +770,17 @@ MainWindow::MainWindow(QWidget* parent) :
 	connect(_mgr, &Manager::ConfigSaveFinished, this, [this](bool ok, const QString& message) {
 		OnBusy(false);
 		if (ok) {
-			if (_settingsPanel) CloseSettings();
+			if (_settingsPanel) {
+				CloseSettings();
+			}
 			// else: an in-table port edit — ConfigLoaded already rebuilt the table.
 		} else {
 			QMessageBox::warning(this, "Could not save", message);
-			if (_settingsPanel)
+			if (_settingsPanel) {
 				_settingsPanel->setEnabled(true);
-			else
+			} else {
 				QueueRefresh(); // revert the edited port cell to its stored value
+			}
 		}
 	});
 	connect(_mgr, &Manager::ReadinessChanged, this, &MainWindow::OnReadiness);
@@ -739,6 +788,7 @@ MainWindow::MainWindow(QWidget* parent) :
 	connect(_mgr, &Manager::AnalyzeFinished, this, &MainWindow::OnAnalyzeFinished);
 	connect(_mgr, &Manager::OperationChanged, this, &MainWindow::OnOperationChanged);
 	connect(_mgr, &Manager::WorkspaceOperationChanged, this, &MainWindow::OnWorkspaceOperationChanged);
+	connect(_mgr, &Manager::UpdateAvailable, this, &MainWindow::OnUpdateAvailable);
 
 	// Rotates the Analyzing… chip icon while idat runs on the worker thread. Several
 	// libraries can analyze at once, so repaint the whole viewport to spin them all.
@@ -751,25 +801,33 @@ MainWindow::MainWindow(QWidget* parent) :
 		// elapsed counter in each active cell (a real progress signal; headless idat
 		// and a booting server expose no %).
 		qint64 anyElapsed = -1;
-		if (!_analyzeClocks.isEmpty())
+		if (!_analyzeClocks.isEmpty()) {
 			anyElapsed = _analyzeClocks.constBegin()->elapsed();
-		else if (!_startingClocks.isEmpty())
+		} else if (!_startingClocks.isEmpty()) {
 			anyElapsed = _startingClocks.constBegin()->elapsed();
+		}
 		if (anyElapsed >= 0 && int(anyElapsed / 1000) != _spinSec) {
 			_spinSec = int(anyElapsed / 1000);
 			auto paintRows = [this](const QHash<QString, QElapsedTimer>& clocks, const QString& prefix) {
 				for (auto it = clocks.constBegin(); it != clocks.constEnd(); ++it) {
 					const int row = _rowOf.value(it.key(), -1);
-					if (row < 0) continue;
-					if (auto* cell = _table->item(row, COL_STATUS))
-						cell->setText(prefix + fmtElapsed(it.value().elapsed()));
+					if (row < 0) {
+						continue;
+					}
+					if (auto* cell = _table->item(row, COL_STATUS)) {
+						cell->setText(prefix + FormatElapsed(it.value().elapsed()));
+					}
 				}
 			};
 			for (auto it = _analyzeClocks.constBegin(); it != _analyzeClocks.constEnd(); ++it) {
 				const QStringList parts = it.key().split('\t');
-				if (parts.size() < 3 || ActiveRevision(parts[0]) != parts[2]) continue;
+				if (parts.size() < 3 || ActiveRevision(parts[0]) != parts[2]) {
+					continue;
+				}
 				const int row = _rowOf.value(RowKey(parts[1], parts[0]), -1);
-				if (row >= 0) _table->item(row, COL_STATUS)->setText("Analyzing… " + fmtElapsed(it.value().elapsed()));
+				if (row >= 0) {
+					_table->item(row, COL_STATUS)->setText("Analyzing… " + FormatElapsed(it.value().elapsed()));
+				}
 			}
 			paintRows(_startingClocks, "Starting… ");
 		}
@@ -795,9 +853,12 @@ MainWindow::MainWindow(QWidget* parent) :
 	connect(this, &MainWindow::RequestSaveConfig, _mgr, &Manager::SaveConfig);
 	connect(this, &MainWindow::RequestImportConfig, _mgr, &Manager::ImportConfig);
 	connect(this, &MainWindow::RequestStoredVersion, _mgr, &Manager::SetStoredVersion);
+	connect(this, &MainWindow::RequestUpdateCheck, _mgr, &Manager::CheckForUpdate);
 
 	connect(_refreshBtn, &QPushButton::clicked, this, [this]() {
-		if (_busy || _refreshPending) return; // mirror QueueRefresh's guard
+		if (_busy || _refreshPending) {
+			return; // mirror QueueRefresh's guard
+		}
 		_refreshAngle = 0;
 		_refreshSpinTimer->start(); // stopped again in OnStatus()
 		QueueRefresh();
@@ -816,13 +877,18 @@ MainWindow::MainWindow(QWidget* parent) :
 	connect(_tabsBtn, &QPushButton::clicked, this, [this] { SetView(1); });
 	connect(_tagCombo, &QComboBox::currentIndexChanged, this, [this](int) { ApplyFilter(); });
 	connect(_versionCombo, &QComboBox::currentIndexChanged, this, [this](int) {
-		if (_view != 1 || _versionCombo->signalsBlocked() || !_tagCombo->count()) return;
+		if (_view != 1 || _versionCombo->signalsBlocked() || !_tagCombo->count()) {
+			return;
+		}
 		const QString tag = _tagCombo->currentData().toString();
 		const QString version = _versionCombo->currentData().toString();
 		bool serverActive = false;
 		for (auto it = _rowState.constBegin(); it != _rowState.constEnd(); ++it) {
 			const QStringList parts = it.key().split('\t');
-			if (parts.value(1) == tag && (it->up || it->starting)) { serverActive = true; break; }
+			if (parts.value(1) == tag && (it->up || it->starting)) {
+				serverActive = true;
+				break;
+			}
 		}
 		if (serverActive && version != _versionByTag.value(tag)) {
 			OnLog(QString("[skip] %1: stop its MCP servers before changing revision").arg(tag));
@@ -838,6 +904,9 @@ MainWindow::MainWindow(QWidget* parent) :
 
 	_thread->start();
 	QueueRefresh();
+	// Behind the first Refresh and the readiness probes: those decide what the window shows,
+	// an update check only decides whether to mention one.
+	QTimer::singleShot(4000, this, [this] { emit RequestUpdateCheck(); });
 
 	_refreshTimer = new QTimer(this);
 	connect(_refreshTimer, &QTimer::timeout, this, &MainWindow::QueueRefresh);
@@ -851,16 +920,21 @@ MainWindow::MainWindow(QWidget* parent) :
 }
 
 MainWindow::~MainWindow() {
-	if (_trayIcon) _trayIcon->hide();
+	if (_trayIcon) {
+		_trayIcon->hide();
+	}
 	_mgr->RequestStopDepot();
 	QVector<Target> analyses;
 	for (auto it = _activeOperations.constBegin(); it != _activeOperations.constEnd(); ++it) {
-		if (it.value() != "analyze") continue;
+		if (it.value() != "analyze") {
+			continue;
+		}
 		const QStringList parts = it.key().split('\t');
 		analyses.push_back({parts.value(0), parts.value(1), parts.value(2)});
 	}
-	if (!analyses.isEmpty() && _thread->isRunning())
+	if (!analyses.isEmpty() && _thread->isRunning()) {
 		QMetaObject::invokeMethod(_mgr, [this, analyses] { _mgr->StopOperations(analyses); }, Qt::BlockingQueuedConnection);
+	}
 	_thread->quit();
 	// An unbounded wait() here is what leaves the process in Task Manager after Exit: a
 	// worker inside a blocking call (a Stop grace window, DepotDownloader, a network
@@ -870,7 +944,9 @@ MainWindow::~MainWindow() {
 	// next launch silently activate the dead process instead of starting a new one.
 	// Not QThread::terminate(): the worker could hold the log mutex, and then the very
 	// next log line (including Qt's own during teardown) would deadlock us here.
-	if (!_thread->wait(15000)) std::_Exit(0);
+	if (!_thread->wait(15000)) {
+		std::_Exit(0);
+	}
 }
 
 void MainWindow::closeEvent(QCloseEvent* event) {
@@ -894,7 +970,9 @@ void MainWindow::closeEvent(QCloseEvent* event) {
 }
 
 void MainWindow::SetupTray() {
-	if (!QSystemTrayIcon::isSystemTrayAvailable()) return;
+	if (!QSystemTrayIcon::isSystemTrayAvailable()) {
+		return;
+	}
 
 	_trayIcon = new QSystemTrayIcon(windowIcon(), this);
 	_trayIcon->setToolTip(QString("IDA Workbench %1").arg(QCoreApplication::applicationVersion()));
@@ -908,8 +986,9 @@ void MainWindow::SetupTray() {
 	connect(open, &QAction::triggered, this, &MainWindow::ShowFromTray);
 	connect(exit, &QAction::triggered, this, &MainWindow::ExitFromTray);
 	connect(_trayIcon, &QSystemTrayIcon::activated, this, [this](QSystemTrayIcon::ActivationReason reason) {
-		if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick)
+		if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick) {
 			ShowFromTray();
+		}
 	});
 	_trayIcon->setContextMenu(menu);
 	_trayIcon->show();
@@ -924,15 +1003,18 @@ void MainWindow::ShowFromTray() {
 void MainWindow::ExitFromTray() {
 	if (_busy) {
 		ShowFromTray();
-		if (!_activeDepotTags.isEmpty())
+		if (!_activeDepotTags.isEmpty()) {
 			QMessageBox::information(this, "Depot update in progress",
 				"A depot update is running. Press Stop to cancel it, then exit.");
-		else
+		} else {
 			QMessageBox::information(this, "Saving configuration", "Wait for configuration saving to finish before exiting.");
+		}
 		return;
 	}
 	_quitting = true;
-	if (_trayIcon) _trayIcon->hide();
+	if (_trayIcon) {
+		_trayIcon->hide();
+	}
 	close();
 	// Do not lean on quitOnLastWindowClosed: one stray visible dialog would leave the
 	// process running with no window left to close it from.
@@ -941,49 +1023,112 @@ void MainWindow::ExitFromTray() {
 
 // Persist the log-splitter layout so the log keeps its dragged height next launch.
 void MainWindow::SaveUiState() {
-	if (!_logSplitter) return;
-	QJsonObject o = readUiState(); // preserve any keys added later
-	o["logSplitter"] = QString::fromLatin1(_logSplitter->saveState().toBase64());
-	QSaveFile f(uiStatePath());
-	if (f.open(QIODevice::WriteOnly)) {
-		f.write(QJsonDocument(o).toJson(QJsonDocument::Compact));
-		f.commit();
+	if (!_logSplitter) {
+		return;
+	}
+	StoreUiState("logSplitter", QString::fromLatin1(_logSplitter->saveState().toBase64()));
+}
+
+// Offers a new release once per version. "Skip" is remembered in ui-state.json, so that
+// version never asks again while the next one still will — a permanent "never check" would
+// be a different setting, and nobody asked for one.
+void MainWindow::OnUpdateAvailable(const QString& version, const QString& releaseUrl) {
+	if (ReadUiState().value("skippedUpdate").toString() == version) {
+		OnLog(QString("[update] %1 was skipped earlier — not asking again").arg(version));
+		return;
+	}
+	// Hidden in the tray means the user is not at the window: a modal dialog would ambush
+	// them from nowhere. The log keeps the news, and the next launch asks again.
+	if (!isVisible()) {
+		OnLog(QString("[update] %1 is available — open the window to be asked about it").arg(version));
+		return;
+	}
+
+	QMessageBox box(this);
+	box.setWindowTitle("Update available");
+	box.setIcon(QMessageBox::Information);
+	box.setText(QString("IDA Workbench %1 is available.").arg(version));
+	box.setInformativeText(QString("You are running %1. The release page has the single-file exe;\n"
+								   "your configuration and databases are untouched by an update.")
+							   .arg(APP_VERSION));
+	auto* open = box.addButton("Open release page", QMessageBox::AcceptRole);
+	auto* skip = box.addButton(QString("Skip %1").arg(version), QMessageBox::DestructiveRole);
+	box.addButton("Later", QMessageBox::RejectRole);
+	box.setDefaultButton(open);
+	for (QAbstractButton* button : box.buttons()) {
+		Ui::ClipRounded(button, 20.0);
+	}
+	box.exec();
+
+	if (box.clickedButton() == open) {
+		QDesktopServices::openUrl(QUrl(releaseUrl));
+		OnLog(QString("[update] opened the release page for %1").arg(version));
+	} else if (box.clickedButton() == skip) {
+		StoreUiState("skippedUpdate", version);
+		OnLog(QString("[update] %1 skipped — you will be asked again when a newer one appears").arg(version));
+	} else {
+		OnLog(QString("[update] %1 postponed until the next launch").arg(version));
 	}
 }
 
 void MainWindow::RecomputeModel() {
 	_tags.clear();
 	_names.clear();
-	for (const Workspace& d : AllWorkspaces(_cfg))
-		if (!_tags.contains(d.tag)) _tags << d.tag;
-	for (const ExtraLib& e : _cfg.extraLibs)
-		if (!_tags.contains(e.tag)) _tags << e.tag;
-	for (const Workspace& d : AllWorkspaces(_cfg))
+	for (const Workspace& d : AllWorkspaces(_cfg)) {
+		if (!_tags.contains(d.tag)) {
+			_tags << d.tag;
+		}
+	}
+	for (const ExtraLib& e : _cfg.extraLibs) {
+		if (!_tags.contains(e.tag)) {
+			_tags << e.tag;
+		}
+	}
+	for (const Workspace& d : AllWorkspaces(_cfg)) {
 		for (const QString& file : d.files) {
 			const QString n = QFileInfo(file).completeBaseName();
-			if (!n.isEmpty() && !_names.contains(n)) _names << n;
+			if (!n.isEmpty() && !_names.contains(n)) {
+				_names << n;
+			}
 		}
+	}
 	for (const ExtraLib& e : _cfg.extraLibs) {
 		const QString n = QFileInfo(e.path).completeBaseName();
-		if (!_names.contains(n)) _names << n;
+		if (!_names.contains(n)) {
+			_names << n;
+		}
 	}
 }
 
 QColor MainWindow::TagColor(const QString& tag) const {
-	for (const Workspace& sd : AllWorkspaces(_cfg))
-		if (sd.tag == tag && !sd.color.trimmed().isEmpty()) return QColor(sd.color.trimmed());
-	for (const ExtraLib& e : _cfg.extraLibs)
-		if (e.tag == tag && !e.color.trimmed().isEmpty()) return QColor(e.color.trimmed());
+	for (const Workspace& sd : AllWorkspaces(_cfg)) {
+		if (sd.tag == tag && !sd.color.trimmed().isEmpty()) {
+			return QColor(sd.color.trimmed());
+		}
+	}
+	for (const ExtraLib& e : _cfg.extraLibs) {
+		if (e.tag == tag && !e.color.trimmed().isEmpty()) {
+			return QColor(e.color.trimmed());
+		}
+	}
 	return Pal::AutoTagBg(tag); // stable colour derived from the tag name
 }
 
 bool MainWindow::InstanceExists(const QString& name, const QString& tag) const {
-	for (const Workspace& d : AllWorkspaces(_cfg))
-		if (d.tag == tag)
-			for (const QString& file : d.files)
-				if (QFileInfo(file).completeBaseName() == name) return true;
-	for (const ExtraLib& e : _cfg.extraLibs)
-		if (e.tag == tag && QFileInfo(e.path).completeBaseName() == name) return true;
+	for (const Workspace& d : AllWorkspaces(_cfg)) {
+		if (d.tag == tag) {
+			for (const QString& file : d.files) {
+				if (QFileInfo(file).completeBaseName() == name) {
+					return true;
+				}
+			}
+		}
+	}
+	for (const ExtraLib& e : _cfg.extraLibs) {
+		if (e.tag == tag && QFileInfo(e.path).completeBaseName() == name) {
+			return true;
+		}
+	}
 	return false;
 }
 
@@ -994,7 +1139,9 @@ void MainWindow::BuildTable() {
 	int row = 0;
 	for (const QString& name : _names) {
 		for (const QString& tag : _tags) {
-			if (!InstanceExists(name, tag)) continue;
+			if (!InstanceExists(name, tag)) {
+				continue;
+			}
 			_table->insertRow(row);
 			auto* sel = new QTableWidgetItem;
 			sel->setFlags(Qt::ItemIsUserCheckable | Qt::ItemIsEnabled);
@@ -1050,15 +1197,17 @@ void MainWindow::BuildTable() {
 	_table->setColumnWidth(COL_DELTA, 118); // 104 px content + 14 px overlay scrollbar gutter
 	// "Sync" compares each tag's analyzed copy against its own Live source (the same
 	// content check that drives "Update available"): in sync / changed / source missing.
-	if (auto* dh = _table->horizontalHeaderItem(COL_DELTA))
+	if (auto* dh = _table->horizontalHeaderItem(COL_DELTA)) {
 		dh->setText("Sync");
+	}
 
 	// Rebuild the bounded workspace dropdown without losing the active tag.
 	const QString activeTag = _tagCombo->currentData().toString();
 	_tagCombo->blockSignals(true);
 	_tagCombo->clear();
-	for (const QString& tag : _tags)
+	for (const QString& tag : _tags) {
 		_tagCombo->addItem(Ui::SwatchIcon(TagColor(tag), 16), tag, tag);
+	}
 	const int activeIndex = _tagCombo->findData(activeTag);
 	_tagCombo->setCurrentIndex(activeIndex >= 0 ? activeIndex : 0);
 	_tagCombo->blockSignals(false);
@@ -1079,7 +1228,9 @@ void MainWindow::RebuildRowOf() {
 	for (int r = 0; r < _table->rowCount(); ++r) {
 		auto* mod = _table->item(r, COL_MODULE);
 		auto* tag = _table->item(r, COL_TAG);
-		if (mod && tag) _rowOf.insert(RowKey(mod->text(), tag->text()), r);
+		if (mod && tag) {
+			_rowOf.insert(RowKey(mod->text(), tag->text()), r);
+		}
 	}
 }
 
@@ -1087,19 +1238,23 @@ void MainWindow::RebuildRowOf() {
 // Columns already active stay active, so several can be combined into one sort;
 // removing the last one restores the original (insertion) order.
 void MainWindow::CycleSort(int column) {
-	if (column == COL_SEL || column == COL_ORDER) return; // checkbox / hidden scratch aren't sortable
+	if (column == COL_SEL || column == COL_ORDER) {
+		return; // checkbox / hidden scratch aren't sortable
+	}
 	int at = -1;
-	for (int i = 0; i < _sortKeys.size(); ++i)
+	for (int i = 0; i < _sortKeys.size(); ++i) {
 		if (_sortKeys[i].first == column) {
 			at = i;
 			break;
 		}
-	if (at < 0)
+	}
+	if (at < 0) {
 		_sortKeys.append({column, Qt::AscendingOrder}); // new key: least-significant (first click stays primary)
-	else if (_sortKeys[at].second == Qt::AscendingOrder)
+	} else if (_sortKeys[at].second == Qt::AscendingOrder) {
 		_sortKeys[at].second = Qt::DescendingOrder;
-	else
+	} else {
 		_sortKeys.remove(at); // third click drops this column from the sort
+	}
 	ApplySort();
 	RebuildRowOf();
 	UpdateSortHeaders();
@@ -1113,7 +1268,9 @@ void MainWindow::CycleSort(int column) {
 // move so whole rows (checkstate, colours, tooltips) travel together.
 void MainWindow::ApplySort() {
 	const int n = _table->rowCount();
-	if (n == 0) return;
+	if (n == 0) {
+		return;
+	}
 	auto insIdx = [this](int row) {
 		const auto* it = _table->item(row, COL_MODULE);
 		return it ? it->data(Qt::UserRole).toInt() : row;
@@ -1121,7 +1278,9 @@ void MainWindow::ApplySort() {
 	auto cellCmp = [this](int a, int b, int col) -> int {
 		const auto* ia = _table->item(a, col);
 		const auto* ib = _table->item(b, col);
-		if (!ia || !ib) return 0;
+		if (!ia || !ib) {
+			return 0;
+		}
 		if (col == COL_PORT || col == COL_SIZE) { // numeric columns sort by their UserRole key
 			const qlonglong va = ia->data(Qt::UserRole).toLongLong();
 			const qlonglong vb = ib->data(Qt::UserRole).toLongLong();
@@ -1134,12 +1293,15 @@ void MainWindow::ApplySort() {
 	std::stable_sort(order.begin(), order.end(), [&](int a, int b) {
 		for (const auto& k : _sortKeys) {
 			const int c = cellCmp(a, b, k.first);
-			if (c != 0) return k.second == Qt::AscendingOrder ? c < 0 : c > 0;
+			if (c != 0) {
+				return k.second == Qt::AscendingOrder ? c < 0 : c > 0;
+			}
 		}
 		return insIdx(a) < insIdx(b); // stable fallback: original insertion order
 	});
-	for (int rank = 0; rank < n; ++rank)
+	for (int rank = 0; rank < n; ++rank) {
 		_table->item(order[rank], COL_ORDER)->setData(Qt::UserRole, rank);
+	}
 	_table->sortItems(COL_ORDER, Qt::AscendingOrder);
 }
 
@@ -1147,34 +1309,46 @@ void MainWindow::ApplySort() {
 void MainWindow::UpdateSortHeaders() {
 	for (int col = 0; col < _table->columnCount(); ++col) {
 		auto* h = _table->horizontalHeaderItem(col);
-		if (!h) continue;
+		if (!h) {
+			continue;
+		}
 		QColor tone = Pal::SORT_INACTIVE;
-		for (const auto& k : _sortKeys)
+		for (const auto& k : _sortKeys) {
 			if (k.first == col) {
 				tone = (k.second == Qt::AscendingOrder) ? Pal::SORT_ASC : Pal::SORT_DESC;
 				break;
 			}
+		}
 		h->setForeground(tone);
 	}
 }
 
 void MainWindow::UpdateRowSelection(int row) {
-	if (row < 0 || row >= _table->rowCount()) return;
+	if (row < 0 || row >= _table->rowCount()) {
+		return;
+	}
 	const auto* selector = _table->item(row, COL_SEL);
 	const QColor background = selector && selector->checkState() == Qt::Checked ? Pal::ROW_SELECTED : QColor(Qt::transparent);
-	for (int col = 0; col < _table->columnCount(); ++col)
-		if (auto* item = _table->item(row, col)) item->setBackground(background);
+	for (int col = 0; col < _table->columnCount(); ++col) {
+		if (auto* item = _table->item(row, col)) {
+			item->setBackground(background);
+		}
+	}
 }
 
 void MainWindow::ShowLibraryContextMenu(const QPoint& position) {
 	const QModelIndex index = _table->indexAt(position);
-	if (!index.isValid()) return;
+	if (!index.isValid()) {
+		return;
+	}
 
 	const bool clickedAlreadySelected = _table->item(index.row(), COL_SEL)->checkState() == Qt::Checked;
 	if (!clickedAlreadySelected) {
 		QSignalBlocker blocker(_table);
 		for (int row = 0; row < _table->rowCount(); ++row) {
-			if (auto* selector = _table->item(row, COL_SEL)) selector->setCheckState(row == index.row() ? Qt::Checked : Qt::Unchecked);
+			if (auto* selector = _table->item(row, COL_SEL)) {
+				selector->setCheckState(row == index.row() ? Qt::Checked : Qt::Unchecked);
+			}
 			UpdateRowSelection(row);
 		}
 	}
@@ -1201,7 +1375,9 @@ void MainWindow::ShowLibraryContextMenu(const QPoint& position) {
 }
 
 void MainWindow::QueueRefresh() {
-	if (_busy || _refreshPending) return;
+	if (_busy || _refreshPending) {
+		return;
+	}
 	_refreshPending = true;
 	emit RequestRefresh();
 }
@@ -1228,7 +1404,9 @@ void MainWindow::UpdateSpinTimer() {
 void MainWindow::SetView(int mode) {
 	if (mode == 0) {
 		for (auto version = _versionByTag.constBegin(); version != _versionByTag.constEnd(); ++version) {
-			if (version.value().isEmpty()) continue;
+			if (version.value().isEmpty()) {
+				continue;
+			}
 			for (auto state = _rowState.constBegin(); state != _rowState.constEnd(); ++state) {
 				const QStringList parts = state.key().split('\t');
 				if (parts.value(1) == version.key() && (state->up || state->starting)) {
@@ -1237,8 +1415,11 @@ void MainWindow::SetView(int mode) {
 				}
 			}
 		}
-		for (auto it = _versionByTag.begin(); it != _versionByTag.end(); ++it)
-			if (!it.value().isEmpty()) emit RequestStoredVersion(it.key(), QString());
+		for (auto it = _versionByTag.begin(); it != _versionByTag.end(); ++it) {
+			if (!it.value().isEmpty()) {
+				emit RequestStoredVersion(it.key(), QString());
+			}
+		}
 		_versionByTag.clear();
 	}
 	_view = mode;
@@ -1264,20 +1445,25 @@ void MainWindow::UpdateSegmented(int active) {
 
 void MainWindow::ApplyFilter() {
 	if (_view == 0) { // list: show everything
-		for (int i = 0; i < _table->rowCount(); ++i) _table->setRowHidden(i, false);
+		for (int i = 0; i < _table->rowCount(); ++i) {
+			_table->setRowHidden(i, false);
+		}
 		UpdateActionButtons();
 		return;
 	}
 	const QString tag = _tagCombo->currentData().toString();
-	for (int i = 0; i < _table->rowCount(); ++i)
+	for (int i = 0; i < _table->rowCount(); ++i) {
 		_table->setRowHidden(i, _table->item(i, COL_TAG)->text() != tag);
+	}
 	_table->scrollToTop();
 	UpdateVersionSelector();
 	UpdateActionButtons();
 }
 
 void MainWindow::UpdateVersionSelector() {
-	if (!_versionCombo) return;
+	if (!_versionCombo) {
+		return;
+	}
 	if (!_tagCombo->count()) {
 		_versionCombo->blockSignals(true);
 		_versionCombo->clear();
@@ -1291,14 +1477,17 @@ void MainWindow::UpdateVersionSelector() {
 	QString output;
 	bool steam = false;
 	QString currentManifest;
-	for (const Workspace& workspace : AllWorkspaces(_cfg))
+	for (const Workspace& workspace : AllWorkspaces(_cfg)) {
 		if (workspace.tag == tag) {
 			output = workspace.output;
 			steam = workspace.depot.enabled;
 			currentManifest = workspace.depot.manifest;
 			break;
 		}
-	if (_versionField) _versionField->setTitle(steam ? "Manifest" : "Revision");
+	}
+	if (_versionField) {
+		_versionField->setTitle(steam ? "Manifest" : "Revision");
+	}
 	const QString selected = _versionByTag.value(tag);
 	// Desired items: Current plus every stored revision or manifest.
 	QStringList wanted{QString()};
@@ -1311,7 +1500,9 @@ void MainWindow::UpdateVersionSelector() {
 		QHash<QString, ManifestOrder> order;
 		for (const QString& manifest : manifests) {
 			QFile inf(QDir(output).filePath(manifest + "/csgo/steam.inf"));
-			if (!inf.open(QIODevice::ReadOnly | QIODevice::Text)) continue;
+			if (!inf.open(QIODevice::ReadOnly | QIODevice::Text)) {
+				continue;
+			}
 			const QString text = QString::fromUtf8(inf.readAll());
 			auto value = [&text](const QString& key) {
 				return QRegularExpression(QString("(?mi)^\\s*%1\\s*=\\s*([^\\r\\n]+)").arg(QRegularExpression::escape(key))).match(text).captured(1).trimmed();
@@ -1321,10 +1512,15 @@ void MainWindow::UpdateVersionSelector() {
 			order.insert(manifest, {QVersionNumber::fromString(value("PatchVersion")), ok ? server : -1});
 		}
 		std::sort(manifests.begin(), manifests.end(), [&order](const QString& a, const QString& b) {
-			const ManifestOrder left = order.value(a), right = order.value(b);
+			const ManifestOrder left = order.value(a);
+			const ManifestOrder right = order.value(b);
 			const int patch = QVersionNumber::compare(left.patch, right.patch);
-			if (patch != 0) return patch > 0;
-			if (left.server != right.server) return left.server > right.server;
+			if (patch != 0) {
+				return patch > 0;
+			}
+			if (left.server != right.server) {
+				return left.server > right.server;
+			}
 			return a > b;
 		});
 		wanted += manifests;
@@ -1336,22 +1532,30 @@ void MainWindow::UpdateVersionSelector() {
 	// OnStatus polls this every refresh; only rebuild when the revision set actually
 	// changed, so an open dropdown is not torn down (and Replace's new revision shows).
 	QStringList current;
-	for (int i = 0; i < _versionCombo->count(); ++i) current << _versionCombo->itemData(i).toString();
+	for (int i = 0; i < _versionCombo->count(); ++i) {
+		current << _versionCombo->itemData(i).toString();
+	}
 	QString currentLabel = "Current";
-	for (const Workspace& workspace : _cfg.steamWorkspaces)
+	for (const Workspace& workspace : _cfg.steamWorkspaces) {
 		if (workspace.tag == tag && (!workspace.depot.manifest.isEmpty() || !workspace.depot.patchVersion.isEmpty() || !workspace.depot.serverVersion.isEmpty())) {
 			QStringList parts{workspace.depot.manifest.isEmpty() ? "Current" : workspace.depot.manifest};
-			if (!workspace.depot.patchVersion.isEmpty()) parts << "Patch " + workspace.depot.patchVersion;
-			if (!workspace.depot.serverVersion.isEmpty()) parts << "Server " + workspace.depot.serverVersion;
+			if (!workspace.depot.patchVersion.isEmpty()) {
+				parts << "Patch " + workspace.depot.patchVersion;
+			}
+			if (!workspace.depot.serverVersion.isEmpty()) {
+				parts << "Server " + workspace.depot.serverVersion;
+			}
 			currentLabel = parts.join(QStringLiteral(" \u00b7 "));
 			break;
 		}
+	}
 	if (current != wanted || _versionCombo->itemText(0) != currentLabel) {
 		_versionCombo->blockSignals(true);
 		_versionCombo->clear();
 		_versionCombo->addItem(currentLabel, QString());
-		for (int i = 1; i < wanted.size(); ++i)
+		for (int i = 1; i < wanted.size(); ++i) {
 			_versionCombo->addItem(steam ? PrettyManifest(output, wanted[i]) : PrettyRevision(wanted[i]), wanted[i]);
+		}
 		_versionCombo->blockSignals(false);
 	}
 	const int index = _versionCombo->findData(selected);
@@ -1368,25 +1572,36 @@ void MainWindow::OnStatus(const QVector<LibRow>& rows) {
 		_refreshSpinTimer->stop();
 		_refreshBtn->setIcon(Ui::Icon("refresh", Pal::ON_SURFACE_VARIANT, 20));
 	}
-	int up = 0, need = 0, diff = 0;
+	int up = 0;
+	int need = 0;
+	int diff = 0;
 	for (const LibRow& r : rows) {
 		for (int t = 0; t < r.cells.size() && t < _tags.size(); ++t) {
 			const QString rk = RowKey(r.name, _tags[t]);
 			const int i = _rowOf.value(rk, -1);
-			if (i < 0) continue;
+			if (i < 0) {
+				continue;
+			}
 			const Cell& c = r.cells[t];
-			if (c.up) ++up;
-			if (c.srcDiff) ++diff;
-			if (c.state == "Not analyzed" || c.state == "Re-analyze" || c.state == "Update available") ++need;
+			if (c.up) {
+				++up;
+			}
+			if (c.srcDiff) {
+				++diff;
+			}
+			if (c.state == "Not analyzed" || c.state == "Re-analyze" || c.state == "Update available") {
+				++need;
+			}
 
 			// A just-started server stays "Starting…" until its port answers (it is
 			// now up) or the grace window lapses — then it hands back to real status.
 			bool starting = false;
 			if (_startingClocks.contains(rk)) {
-				if (c.up || _startingClocks[rk].elapsed() >= kStartGraceMs)
+				if (c.up || _startingClocks[rk].elapsed() >= kStartGraceMs) {
 					_startingClocks.remove(rk);
-				else
+				} else {
 					starting = true;
+				}
 			}
 			const Target visibleTarget{_tags[t], r.name, ActiveRevision(_tags[t])};
 			const QString operation = _activeOperations.value(TargetKey(visibleTarget));
@@ -1408,10 +1623,10 @@ void MainWindow::OnStatus(const QVector<LibRow>& rows) {
 			} else if (analyzing) {
 				const qint64 elapsed = _analyzeClocks.contains(TargetKey(visibleTarget)) ?
 					_analyzeClocks[TargetKey(visibleTarget)].elapsed() : 0;
-				stItem->setText("Analyzing… " + fmtElapsed(elapsed));
+				stItem->setText("Analyzing… " + FormatElapsed(elapsed));
 				stItem->setToolTip(QString("%1 @ %2\nStatus: Analyzing…").arg(r.name, _tags[t]));
 			} else if (starting) {
-				stItem->setText("Starting… " + fmtElapsed(_startingClocks[rk].elapsed()));
+				stItem->setText("Starting… " + FormatElapsed(_startingClocks[rk].elapsed()));
 				stItem->setToolTip(QString("%1 @ %2\nStatus: Starting… — IDA is loading the database and binding the MCP "
 										   "port. Large databases can take up to a minute; Stop cancels it.")
 									   .arg(r.name, _tags[t]));
@@ -1421,7 +1636,7 @@ void MainWindow::OnStatus(const QVector<LibRow>& rows) {
 			}
 			const qint64 eff = (c.size >= 0) ? c.size : c.srcSize;
 			auto* szItem = _table->item(i, COL_SIZE);
-			szItem->setText(eff >= 0 ? mb(eff) : "—");
+			szItem->setText(eff >= 0 ? FormatMegabytes(eff) : "—");
 			szItem->setData(Qt::UserRole, eff >= 0 ? eff : 0); // numeric sort key
 			// Sync column: needs both a local copy and a live source to compare.
 			const bool comparable = c.size >= 0 && c.srcSize >= 0;
@@ -1451,11 +1666,14 @@ void MainWindow::OnStatus(const QVector<LibRow>& rows) {
 	// and wrongly disable its actions. Re-apply the per-tag filter (no scroll).
 	if (_view == 1) {
 		const QString tag = _tagCombo->currentData().toString();
-		for (int i = 0; i < _table->rowCount(); ++i)
+		for (int i = 0; i < _table->rowCount(); ++i) {
 			_table->setRowHidden(i, _table->item(i, COL_TAG)->text() != tag);
+		}
 	}
 	UpdateActionButtons();
-	if (_view == 1) UpdateVersionSelector(); // reflect newly stored revisions or manifests
+	if (_view == 1) {
+		UpdateVersionSelector(); // reflect newly stored revisions or manifests
+	}
 	UpdateSpinTimer(); // a Starting… row may have just resolved (up / timed out)
 
 	// While a server is up — or one is still booting — we poll briskly so a change
@@ -1463,7 +1681,9 @@ void MainWindow::OnStatus(const QVector<LibRow>& rows) {
 	_anyServerUp = (up > 0);
 	if (_refreshTimer && !_busy && _stack && _stack->currentWidget() == _mainPage) {
 		const int want = RefreshIntervalMs();
-		if (_refreshTimer->interval() != want) _refreshTimer->start(want);
+		if (_refreshTimer->interval() != want) {
+			_refreshTimer->start(want);
+		}
 	}
 }
 
@@ -1486,7 +1706,9 @@ void MainWindow::OnAnalyzeFinished(const Target& target, bool ok) {
 	// Reflect this library immediately; its own Refresh refines the filesystem state.
 	_analyzeClocks.remove(TargetKey(target));
 	const int row = ActiveRevision(target.tag) == target.revision ? _rowOf.value(RowKey(target.name, target.tag), -1) : -1;
-	if (row < 0) return;
+	if (row < 0) {
+		return;
+	}
 	if (auto* it = _table->item(row, COL_STATUS)) {
 		it->setText(ok ? "Ready" : "Re-analyze");
 		it->setToolTip(QString("%1 @ %2\nStatus: %3").arg(target.name, target.tag, ok ? "Ready — freshly analyzed" : "Analysis failed — see the log"));
@@ -1496,16 +1718,23 @@ void MainWindow::OnAnalyzeFinished(const Target& target, bool ok) {
 
 void MainWindow::OnOperationChanged(const Target& target, const QString& operation, bool active) {
 	const QString key = TargetKey(target);
-	if (active) _activeOperations.insert(key, operation);
-	else _activeOperations.remove(key);
+	if (active) {
+		_activeOperations.insert(key, operation);
+	} else {
+		_activeOperations.remove(key);
+	}
 	if (ActiveRevision(target.tag) == target.revision) {
 		RowState& state = _rowState[RowKey(target.name, target.tag)];
-		if (operation == "analyze") state.analyzing = active;
+		if (operation == "analyze") {
+			state.analyzing = active;
+		}
 		if (operation == "ida") {
 			state.idaOpen = active;
 			if (active) {
 				const int row = _rowOf.value(RowKey(target.name, target.tag), -1);
-				if (row >= 0) _table->item(row, COL_STATUS)->setText("Open in IDA");
+				if (row >= 0) {
+					_table->item(row, COL_STATUS)->setText("Open in IDA");
+				}
 			}
 		}
 	}
@@ -1513,14 +1742,23 @@ void MainWindow::OnOperationChanged(const Target& target, const QString& operati
 }
 
 void MainWindow::OnWorkspaceOperationChanged(const QString& tag, const QString&, bool active) {
-	if (active) _activeDepotTags.insert(tag);
-	else _activeDepotTags.remove(tag);
-	for (auto it = _rowState.begin(); it != _rowState.end(); ++it)
-		if (it.key().section('\t', 1, 1) == tag) it->depot = active;
-	if (active)
-		for (int row = 0; row < _table->rowCount(); ++row)
-			if (_table->item(row, COL_TAG)->text() == tag)
+	if (active) {
+		_activeDepotTags.insert(tag);
+	} else {
+		_activeDepotTags.remove(tag);
+	}
+	for (auto it = _rowState.begin(); it != _rowState.end(); ++it) {
+		if (it.key().section('\t', 1, 1) == tag) {
+			it->depot = active;
+		}
+	}
+	if (active) {
+		for (int row = 0; row < _table->rowCount(); ++row) {
+			if (_table->item(row, COL_TAG)->text() == tag) {
 				_table->item(row, COL_STATUS)->setText("Downloading…");
+			}
+		}
+	}
 	UpdateSpinTimer();
 	// DoDepotUpdate takes the busy lock when it issues the request, and the worker
 	// saves the config only when a manifest actually changed — so ConfigSaveFinished
@@ -1533,10 +1771,12 @@ void MainWindow::OnWorkspaceOperationChanged(const QString& tag, const QString&,
 // Infer a canonical log level from the worker's message prefix so the file reads
 // as a proper log (the panel keeps the raw text either way).
 static Log::Level InferLogLevel(const QString& m) {
-	if (m.startsWith("[fail]") || m.startsWith("[refused]") || m.contains("failed") || m.contains("cannot ") || m.contains("rejected"))
+	if (m.startsWith("[fail]") || m.startsWith("[refused]") || m.contains("failed") || m.contains("cannot ") || m.contains("rejected")) {
 		return Log::Level::Error;
-	if (m.startsWith("[warn]") || m.startsWith("[skip]") || m.startsWith("[stopped]"))
+	}
+	if (m.startsWith("[warn]") || m.startsWith("[skip]") || m.startsWith("[stopped]")) {
 		return Log::Level::Warn;
+	}
 	return Log::Level::Info;
 }
 
@@ -1547,7 +1787,9 @@ void MainWindow::OnLog(const QString& msg) {
 
 void MainWindow::OnBusy(bool busy) {
 	_busy = busy;
-	if (!busy && _spinTimer) UpdateSpinTimer();
+	if (!busy && _spinTimer) {
+		UpdateSpinTimer();
+	}
 	if (busy && _refreshSpinTimer && _refreshSpinTimer->isActive()) { // op preempts a Refresh
 		_refreshSpinTimer->stop();
 		_refreshBtn->setIcon(Ui::Icon("refresh", Pal::ON_SURFACE_VARIANT, 20));
@@ -1559,7 +1801,9 @@ void MainWindow::OnBusy(bool busy) {
 		_analyzeBtn->setEnabled(false);
 		_replaceBtn->setEnabled(false);
 		_depotBtn->setEnabled(false);
-		if (_deleteBtn) _deleteBtn->setEnabled(false); // UpdateActionButtons skips while busy
+		if (_deleteBtn) {
+			_deleteBtn->setEnabled(false); // UpdateActionButtons skips while busy
+		}
 		_stopBtn->setText("Stop");
 		_stopBtn->setIcon(Ui::Icon("stop", Pal::STOP_FG, 18, true));
 		// A depot update holds the lock for its whole run (minutes), so Stop stays live
@@ -1569,25 +1813,46 @@ void MainWindow::OnBusy(bool busy) {
 		_stopBtn->setText("Stop");
 		_stopBtn->setIcon(Ui::Icon("stop", Pal::STOP_FG, 18, true));
 	}
-	if (_refreshBtn) _refreshBtn->setEnabled(!busy);
-	if (_addBinBtn) _addBinBtn->setEnabled(!busy);
-	if (_versionCombo) _versionCombo->setEnabled(!busy && _tagCombo && _tagCombo->count() > 0);
-	if (_tagCombo) _tagCombo->setEnabled(!busy);
-	if (_table) static_cast<SelectHeader*>(_table->horizontalHeader())->setSelectionEnabled(!busy);
-	if (_mcpBtn) _mcpBtn->setEnabled(!busy);
-	if (_settingsBtn) _settingsBtn->setEnabled(!busy);
-	if (_listBtn) _listBtn->setEnabled(!busy);
-	if (_tabsBtn) _tabsBtn->setEnabled(!busy);
+	if (_refreshBtn) {
+		_refreshBtn->setEnabled(!busy);
+	}
+	if (_addBinBtn) {
+		_addBinBtn->setEnabled(!busy);
+	}
+	if (_versionCombo) {
+		_versionCombo->setEnabled(!busy && _tagCombo && _tagCombo->count() > 0);
+	}
+	if (_tagCombo) {
+		_tagCombo->setEnabled(!busy);
+	}
+	if (_table) {
+		static_cast<SelectHeader*>(_table->horizontalHeader())->SetSelectionEnabled(!busy);
+	}
+	if (_mcpBtn) {
+		_mcpBtn->setEnabled(!busy);
+	}
+	if (_settingsBtn) {
+		_settingsBtn->setEnabled(!busy);
+	}
+	if (_listBtn) {
+		_listBtn->setEnabled(!busy);
+	}
+	if (_tabsBtn) {
+		_tabsBtn->setEnabled(!busy);
+	}
 	if (_refreshTimer) {
-		if (busy)
+		if (busy) {
 			_refreshTimer->stop();
-		else if (_stack && _stack->currentWidget() == _mainPage)
+		} else if (_stack && _stack->currentWidget() == _mainPage) {
 			_refreshTimer->start(RefreshIntervalMs());
+		}
 	}
 	// Last, so it keeps the final word on the widgets it owns (Add binary, Settings):
 	// the blanket !busy assignments above would otherwise re-enable them while IDA is
 	// still open on a row, leaving buttons that look live but do nothing when clicked.
-	if (!busy) UpdateActionButtons(); // selection-aware enable
+	if (!busy) {
+		UpdateActionButtons(); // selection-aware enable
+	}
 }
 
 // The configured file list is a wish list, not a promise: a depot may not ship every
@@ -1597,8 +1862,9 @@ QString MainWindow::ActionBlocker(Action action, const Target& target) const {
 	const RowState state = _rowState.value(RowKey(target.name, target.tag));
 	const bool depotActive = _activeDepotTags.contains(target.tag);
 	// Stop is the mirror image of the others: it wants a row that IS busy.
-	if (action == Action::Stop)
+	if (action == Action::Stop) {
 		return (state.up || state.starting || state.analyzing || depotActive) ? QString() : "nothing running";
+	}
 
 	// Depot update is workspace-scoped: the checked row only names the workspace, so what
 	// that particular module is doing is beside the point — and a served or opened module
@@ -1607,21 +1873,32 @@ QString MainWindow::ActionBlocker(Action action, const Target& target) const {
 	// that is in use) depends on which manifest Steam answers with, so it cannot be known
 	// before the click: the worker reports it as a [skip].
 	if (action == Action::Depot) {
-		if (depotActive) return "depot update running";
-		for (const Workspace& workspace : _cfg.steamWorkspaces)
-			if (workspace.tag == target.tag)
+		if (depotActive) {
+			return "depot update running";
+		}
+		for (const Workspace& workspace : _cfg.steamWorkspaces) {
+			if (workspace.tag == target.tag) {
 				return workspace.depot.enabled ? QString() : "depot download is off for this workspace";
+			}
+		}
 		return "not a Steam workspace";
 	}
 
 	// Transient conflicts: someone else holds the files. Listed before the permanent
 	// properties below because these are the ones the user can clear and retry.
-	if (depotActive) return "depot update running";
-	if (state.idaOpen) return "open in IDA";
-	if (state.analyzing) return "analyzing";
+	if (depotActive) {
+		return "depot update running";
+	}
+	if (state.idaOpen) {
+		return "open in IDA";
+	}
+	if (state.analyzing) {
+		return "analyzing";
+	}
 	// Already serving is not a fault for Start — it just has nothing left to do there.
-	if (state.up || state.starting)
+	if (state.up || state.starting) {
 		return action == Action::Start ? "already served" : "MCP server running — stop it first";
+	}
 
 	switch (action) {
 		using enum Action;
@@ -1632,9 +1909,14 @@ QString MainWindow::ActionBlocker(Action action, const Target& target) const {
 		case Analyze:
 			return (state.localBin || state.srcBin) ? QString() : "no binary here";
 		case Replace:
-			if (!state.srcBin) return "no binary in the source folder";
-			for (const Workspace& workspace : _cfg.workspaces)
-				if (workspace.tag == target.tag) return {};
+			if (!state.srcBin) {
+				return "no binary in the source folder";
+			}
+			for (const Workspace& workspace : _cfg.workspaces) {
+				if (workspace.tag == target.tag) {
+					return {};
+				}
+			}
 			return "not a source-folder workspace";
 		// Delete only edits config, but the transient checks above still apply: a
 		// running server must be stopped first so we never orphan a process whose
@@ -1651,16 +1933,19 @@ QVector<Target> MainWindow::EligibleTargets(Action action, const QVector<Target>
 	QVector<Target> eligible;
 	for (const Target& target : selection) {
 		const QString blocker = ActionBlocker(action, target);
-		if (blocker.isEmpty())
+		if (blocker.isEmpty()) {
 			eligible.push_back(target);
-		else if (skipped)
+		} else if (skipped) {
 			*skipped << QString("%1 — %2").arg(target.name, blocker);
+		}
 	}
 	return eligible;
 }
 
 void MainWindow::LogSkipped(const QString& action, const QStringList& skipped) {
-	if (skipped.isEmpty()) return;
+	if (skipped.isEmpty()) {
+		return;
+	}
 	OnLog(QString("%1: skipping %2 of the checked modules (%3)").arg(action).arg(skipped.size()).arg(skipped.join("; ")));
 }
 
@@ -1668,8 +1953,12 @@ void MainWindow::LogSkipped(const QString& action, const QStringList& skipped) {
 // past the screen; the tail is counted, never silently dropped.
 static QString SkipList(const QStringList& skipped, int cap = 6) {
 	QStringList lines;
-	for (const QString& entry : skipped.mid(0, cap)) lines << QString("  • ") + entry;
-	if (skipped.size() > cap) lines << QString("  • …and %1 more").arg(skipped.size() - cap);
+	for (const QString& entry : skipped.mid(0, cap)) {
+		lines << QString("  • ") + entry;
+	}
+	if (skipped.size() > cap) {
+		lines << QString("  • …and %1 more").arg(skipped.size() - cap);
+	}
 	return lines.join('\n');
 }
 
@@ -1681,15 +1970,21 @@ static QString Modules(int count) { return count == 1 ? QStringLiteral("1 module
 // skips — or why it is dead — is always in the tooltip (and repeated in the
 // confirmation dialog and the log), so a grey button is never a mystery.
 void MainWindow::UpdateActionButtons() {
-	if (_busy) return; // busy state is owned by OnBusy()
-	int visible = 0, checked = 0;
-	for (int i = 0; i < _table->rowCount(); ++i)
+	if (_busy) {
+		return; // busy state is owned by OnBusy()
+	}
+	int visible = 0;
+	int checked = 0;
+	for (int i = 0; i < _table->rowCount(); ++i) {
 		if (!_table->isRowHidden(i)) {
 			++visible;
-			if (_table->item(i, COL_SEL)->checkState() == Qt::Checked) ++checked;
+			if (_table->item(i, COL_SEL)->checkState() == Qt::Checked) {
+				++checked;
+			}
 		}
+	}
 	const Qt::CheckState headerState = checked == 0 ? Qt::Unchecked : checked == visible ? Qt::Checked : Qt::PartiallyChecked;
-	static_cast<SelectHeader*>(_table->horizontalHeader())->setCheckState(headerState);
+	static_cast<SelectHeader*>(_table->horizontalHeader())->SetCheckState(headerState);
 
 	const QVector<Target> selection = SelectedTargets();
 	const bool archived = _view == 1 && _versionCombo && !_versionCombo->currentData().toString().isEmpty();
@@ -1700,7 +1995,9 @@ void MainWindow::UpdateActionButtons() {
 	// `gate` is a precondition that has nothing to do with the individual rows: while
 	// it holds the button is dead no matter what is checked, and it says why.
 	auto apply = [&](QPushButton* button, Action action, const QString& title, const QString& runs, const QString& gate) {
-		if (!button) return;
+		if (!button) {
+			return;
+		}
 		QStringList skipped;
 		const int count = gate.isEmpty() ? EligibleTargets(action, selection, &skipped).size() : 0;
 		button->setEnabled(count > 0);
@@ -1725,11 +2022,14 @@ void MainWindow::UpdateActionButtons() {
 	// A depot update is workspace-scoped: the checked rows only pick which workspace,
 	// and the download always covers that workspace's whole file list.
 	if (_depotBtn) {
-		QStringList depotTags, blockers;
+		QStringList depotTags;
+		QStringList blockers;
 		for (const Target& target : selection) {
 			const QString blocker = ActionBlocker(Action::Depot, target);
 			if (blocker.isEmpty()) {
-				if (!depotTags.contains(target.tag)) depotTags << target.tag;
+				if (!depotTags.contains(target.tag)) {
+					depotTags << target.tag;
+				}
 			} else if (!blockers.contains(blocker)) {
 				blockers << blocker;
 			}
@@ -1742,7 +2042,9 @@ void MainWindow::UpdateActionButtons() {
 			selection.isEmpty() ? QStringLiteral("Check a module of a Steam workspace.") :
 			QString("Not available here: %1.").arg(blockers.join("; "))));
 	}
-	if (_addBinBtn) _addBinBtn->setEnabled(!depotRunning);
+	if (_addBinBtn) {
+		_addBinBtn->setEnabled(!depotRunning);
+	}
 	if (_settingsBtn) {
 		const bool configSafe = _activeOperations.isEmpty() && _activeDepotTags.isEmpty();
 		_settingsBtn->setEnabled(configSafe);
@@ -1782,9 +2084,13 @@ void MainWindow::OnConfigLoaded(const ConfigView& v) {
 // Double-clicking a Port cell prompts for a new port. Uses a plain line-edit
 // dialog (no spinbox arrows) and only persists when the value actually changes.
 void MainWindow::EditPort(int row) {
-	if (_busy || !_activeDepotTags.isEmpty()) return;
+	if (_busy || !_activeDepotTags.isEmpty()) {
+		return;
+	}
 	auto* portItem = _table->item(row, COL_PORT);
-	if (!portItem) return;
+	if (!portItem) {
+		return;
+	}
 	const QString name = _table->item(row, COL_MODULE)->text();
 	const QString tag = _table->item(row, COL_TAG)->text();
 	const int cur = portItem->text().toInt();
@@ -1793,13 +2099,19 @@ void MainWindow::EditPort(int row) {
 		this, "MCP port", QString("Port for %1 @ %2:").arg(name, tag),
 		QLineEdit::Normal, cur > 0 ? QString::number(cur) : QString(), &ok
 	);
-	if (!ok) return;
-	const int p = txt.trimmed().toInt();
-	if (p < 1 || p > 65535) {
-		OnLog(QString("(port must be 1..65535)"));
+	if (!ok) {
 		return;
 	}
-	if (p == cur) return;
+	const int p = txt.trimmed().toInt();
+	// Same floor as the base port: binding below 1024 needs privileges Workbench does not
+	// have, so accepting such a port here would only fail later, at MCP Start.
+	if (p < 1024 || p > 65535) {
+		OnLog(QString("(port must be 1024..65535)"));
+		return;
+	}
+	if (p == cur) {
+		return;
+	}
 	ApplyPortEdit(row, p);
 }
 
@@ -1818,33 +2130,39 @@ void MainWindow::ApplyPortEdit(int row, int newPort) {
 	bool scanHere = false;
 	int fileIndex = -1;
 	int tagOffset = 0; // does this tag track this scan library?
-	for (const Workspace& sd : AllWorkspaces(cfg))
+	for (const Workspace& sd : AllWorkspaces(cfg)) {
 		if (sd.tag == tag) {
 			tagOffset = sd.portOffset;
-			for (int i = 0; i < sd.files.size(); ++i)
+			for (int i = 0; i < sd.files.size(); ++i) {
 				if (QFileInfo(sd.files[i]).completeBaseName() == name) {
 					scanHere = true;
 					fileIndex = i;
 					break;
 				}
+			}
 			break;
 		}
+	}
 
 	bool applied = false;
 	if (scanHere) { // scan library: (tag, name) override
-		for (int i = cfg.portOverrides.size() - 1; i >= 0; --i)
-			if (cfg.portOverrides[i].tag == tag && cfg.portOverrides[i].name == name)
+		for (int i = cfg.portOverrides.size() - 1; i >= 0; --i) {
+			if (cfg.portOverrides[i].tag == tag && cfg.portOverrides[i].name == name) {
 				cfg.portOverrides.remove(i);
-		if (newPort != AutoScanPort(cfg.basePort, fileIndex, tagOffset))
+			}
+		}
+		if (newPort != AutoScanPort(cfg.basePort, fileIndex, tagOffset)) {
 			cfg.portOverrides.push_back({tag, name, newPort});
+		}
 		applied = true;
 	} else { // extra library: absolute port
-		for (int i = 0; i < cfg.extraLibs.size(); ++i)
+		for (int i = 0; i < cfg.extraLibs.size(); ++i) {
 			if (cfg.extraLibs[i].tag == tag && QFileInfo(cfg.extraLibs[i].path).completeBaseName() == name) {
 				cfg.extraLibs[i].port = (newPort == AutoExtraPort(cfg.basePort, i)) ? 0 : newPort;
 				applied = true;
 				break;
 			}
+		}
 	}
 	if (!applied) {
 		QueueRefresh();
@@ -1858,8 +2176,12 @@ void MainWindow::ApplyPortEdit(int row, int newPort) {
 QVector<Target> MainWindow::SelectedTargets() const {
 	QVector<Target> targets;
 	for (int i = 0; i < _table->rowCount(); ++i) {
-		if (_table->isRowHidden(i)) continue; // only act on what is visible + checked
-		if (_table->item(i, COL_SEL)->checkState() != Qt::Checked) continue;
+		if (_table->isRowHidden(i)) {
+			continue; // only act on what is visible + checked
+		}
+		if (_table->item(i, COL_SEL)->checkState() != Qt::Checked) {
+			continue;
+		}
 		const QString tag = _table->item(i, COL_TAG)->text();
 		targets.push_back({tag, _table->item(i, COL_MODULE)->text(), ActiveRevision(tag)});
 	}
@@ -1867,12 +2189,16 @@ QVector<Target> MainWindow::SelectedTargets() const {
 }
 
 QString MainWindow::ActiveRevision(const QString& tag) const {
-	if (_view != 1 || !_tagCombo || _tagCombo->currentData().toString() != tag || !_versionCombo) return {};
+	if (_view != 1 || !_tagCombo || _tagCombo->currentData().toString() != tag || !_versionCombo) {
+		return {};
+	}
 	return _versionCombo->currentData().toString();
 }
 
 void MainWindow::DoOpenIda() {
-	if (_busy) return;
+	if (_busy) {
+		return;
+	}
 	const QVector<Target> selection = SelectedTargets();
 	if (selection.size() != 1) {
 		OnLog("(check exactly one module to open in IDA)");
@@ -1887,7 +2213,9 @@ void MainWindow::DoOpenIda() {
 }
 
 void MainWindow::DoStart() {
-	if (_busy) return;
+	if (_busy) {
+		return;
+	}
 	QStringList skipped;
 	const QVector<Target> targets = EligibleTargets(Action::Start, SelectedTargets(), &skipped);
 	if (targets.isEmpty()) {
@@ -1898,14 +2226,21 @@ void MainWindow::DoStart() {
 	// Mark each target "Starting…" now: IDA takes seconds-to-a-minute to bind its
 	// port, and until it does the row is "down". Tracking the launch keeps the Stop
 	// button live (and the cell honest) through that window instead of greying out.
-	for (const Target& tg : targets)
-		if (!_rowState.value(RowKey(tg.name, tg.tag)).up) _startingClocks[RowKey(tg.name, tg.tag)].start();
+	for (const Target& tg : targets) {
+		if (!_rowState.value(RowKey(tg.name, tg.tag)).up) {
+			_startingClocks[RowKey(tg.name, tg.tag)].start();
+		}
+	}
 	UpdateSpinTimer();
-	if (_refreshTimer) _refreshTimer->start(RefreshIntervalMs()); // poll briskly to catch the bind
+	if (_refreshTimer) {
+		_refreshTimer->start(RefreshIntervalMs()); // poll briskly to catch the bind
+	}
 	emit RequestStart(targets);
 }
 void MainWindow::DoStop() {
-	if (_busy && _activeDepotTags.isEmpty()) return; // busy for a config save: nothing to stop
+	if (_busy && _activeDepotTags.isEmpty()) {
+		return; // busy for a config save: nothing to stop
+	}
 	const QVector<Target> selected = SelectedTargets();
 	if (selected.isEmpty()) {
 		OnLog("(select at least one row)");
@@ -1924,10 +2259,14 @@ void MainWindow::DoStop() {
 			analyses.push_back(target);
 		} else {
 			const RowState state = _rowState.value(RowKey(target.name, target.tag));
-			if (state.up || state.starting) servers.push_back(target);
+			if (state.up || state.starting) {
+				servers.push_back(target);
+			}
 		}
 	}
-	if (!analyses.isEmpty()) emit RequestStopOperations(analyses);
+	if (!analyses.isEmpty()) {
+		emit RequestStopOperations(analyses);
+	}
 	if (stopDepot) {
 		OnLog("stopping DepotDownloader...");
 		_mgr->RequestStopDepot();
@@ -1935,7 +2274,9 @@ void MainWindow::DoStop() {
 	// Dropping the "Starting…" mark hands the row back to real port status: the
 	// worker kills whatever is on the port, and anything still booting shows plain
 	// "down" (then UP once it binds, where a second Stop takes effect).
-	for (const Target& target : servers) _startingClocks.remove(RowKey(target.name, target.tag));
+	for (const Target& target : servers) {
+		_startingClocks.remove(RowKey(target.name, target.tag));
+	}
 	if (!servers.isEmpty()) {
 		UpdateSpinTimer();
 		emit RequestStop(servers);
@@ -1944,7 +2285,9 @@ void MainWindow::DoStop() {
 // Confirmation dialogs spell out the batch the command really runs on and list what
 // it leaves behind: partial application is only safe when it is visible before the OK.
 void MainWindow::DoAnalyze() {
-	if (_busy) return;
+	if (_busy) {
+		return;
+	}
 	const QVector<Target> selection = SelectedTargets();
 	QStringList skipped;
 	const QVector<Target> targets = EligibleTargets(Action::Analyze, selection, &skipped);
@@ -1953,8 +2296,9 @@ void MainWindow::DoAnalyze() {
 		return;
 	}
 	QString text = QString("Analyze %1?\nThis overwrites their .i64 (annotations lost) and can take minutes.").arg(Modules(targets.size()));
-	if (!skipped.isEmpty())
+	if (!skipped.isEmpty()) {
 		text += QString("\n\nSkipping %1 of the %2 checked:\n%3").arg(skipped.size()).arg(Modules(selection.size()), SkipList(skipped, 12));
+	}
 	if (QMessageBox::warning(this, "Analyze", text, QMessageBox::Ok | QMessageBox::Cancel) == QMessageBox::Ok) {
 		LogSkipped("analyze", skipped);
 		emit RequestAnalyze(targets, true);
@@ -1962,7 +2306,9 @@ void MainWindow::DoAnalyze() {
 }
 
 void MainWindow::DoReplace() {
-	if (_busy) return;
+	if (_busy) {
+		return;
+	}
 	const QVector<Target> selection = SelectedTargets();
 	QStringList skipped;
 	const QVector<Target> targets = EligibleTargets(Action::Replace, selection, &skipped);
@@ -1976,8 +2322,9 @@ void MainWindow::DoReplace() {
 						   "• If it doesn't, only the fresh binary is copied and the stale "
 						   "database here is removed — press Analyze afterwards.")
 					   .arg(Modules(targets.size()));
-	if (!skipped.isEmpty())
+	if (!skipped.isEmpty()) {
 		text += QString("\n\nSkipping %1 of the %2 checked:\n%3").arg(skipped.size()).arg(Modules(selection.size()), SkipList(skipped, 12));
+	}
 	if (QMessageBox::warning(this, "Replace binaries", text, QMessageBox::Ok | QMessageBox::Cancel) == QMessageBox::Ok) {
 		LogSkipped("replace", skipped);
 		emit RequestReplace(targets);
@@ -1985,7 +2332,9 @@ void MainWindow::DoReplace() {
 }
 
 void MainWindow::DoDepotUpdate() {
-	if (_busy || !_activeDepotTags.isEmpty()) return;
+	if (_busy || !_activeDepotTags.isEmpty()) {
+		return;
+	}
 	// The checked rows only pick the workspace here: DepotDownloader then fetches that
 	// workspace's whole file list, so nothing is "skipped" by narrowing the selection.
 	QStringList blockers;
@@ -1993,7 +2342,9 @@ void MainWindow::DoDepotUpdate() {
 	for (const Target& target : SelectedTargets()) {
 		const QString blocker = ActionBlocker(Action::Depot, target);
 		if (blocker.isEmpty()) {
-			if (!tags.contains(target.tag)) tags << target.tag;
+			if (!tags.contains(target.tag)) {
+				tags << target.tag;
+			}
 		} else if (!blockers.contains(blocker)) {
 			blockers << blocker;
 		}
@@ -2008,9 +2359,12 @@ void MainWindow::DoDepotUpdate() {
 		return;
 	}
 	const Workspace* workspace = nullptr;
-	for (const Workspace& candidate : _cfg.steamWorkspaces)
+	for (const Workspace& candidate : _cfg.steamWorkspaces) {
 		if (candidate.tag == tags.first()) { workspace = &candidate; break; }
-	if (!workspace) return;
+	}
+	if (!workspace) {
+		return;
+	}
 
 	QDialog dialog(this);
 	dialog.setWindowTitle("Download depot");
@@ -2074,7 +2428,9 @@ void MainWindow::DoDepotUpdate() {
 		}
 		customField->setVisible(customMode);
 		customId->setEnabled(customMode);
-		for (QGroupBox* field : {usernameField.second, passwordField.second, authCodeField.second}) field->setVisible(customMode);
+		for (QGroupBox* field : {usernameField.second, passwordField.second, authCodeField.second}) {
+			field->setVisible(customMode);
+		}
 		rememberSession->setVisible(customMode);
 		const bool codeHasCredentials = authCodeField.first->text().trimmed().isEmpty() ||
 			(!usernameField.first->text().trimmed().isEmpty() && !passwordField.first->text().isEmpty());
@@ -2086,12 +2442,15 @@ void MainWindow::DoDepotUpdate() {
 	connect(latest, &QPushButton::clicked, &dialog, [&customMode, applyMode] { customMode = false; applyMode(); });
 	connect(specific, &QPushButton::clicked, &dialog, [&customMode, applyMode, customId] { customMode = true; applyMode(); customId->setFocus(); });
 	connect(customId, &QLineEdit::textChanged, &dialog, [applyMode](const QString&) { applyMode(); });
-	for (QLineEdit* input : {usernameField.first, passwordField.first, authCodeField.first})
+	for (QLineEdit* input : {usernameField.first, passwordField.first, authCodeField.first}) {
 		connect(input, &QLineEdit::textChanged, &dialog, [applyMode](const QString&) { applyMode(); });
+	}
 	connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 	connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 	applyMode();
-	if (dialog.exec() != QDialog::Accepted) return;
+	if (dialog.exec() != QDialog::Accepted) {
+		return;
+	}
 	const QString selected = customMode ? customId->text().trimmed() : "latest";
 	OnBusy(true);
 	emit RequestDepotUpdate(tags, selected,
@@ -2105,7 +2464,9 @@ void MainWindow::DoDepotUpdate() {
 // the analyzed .i64 and the binaries on disk are left untouched. Each selected
 // (tag, library) entry is removed from its own workspace only.
 void MainWindow::DoDelete() {
-	if (_busy || !_activeDepotTags.isEmpty()) return;
+	if (_busy || !_activeDepotTags.isEmpty()) {
+		return;
+	}
 	const QVector<Target> selection = SelectedTargets();
 	QStringList skipped;
 	const QVector<Target> targets = EligibleTargets(Action::Delete, selection, &skipped);
@@ -2118,50 +2479,71 @@ void MainWindow::DoDelete() {
 		return e.tag == tag && QFileInfo(e.path).completeBaseName() == name;
 	};
 	auto isExtra = [&](const QString& tag, const QString& name) {
-		for (const ExtraLib& e : _cfg.extraLibs)
-			if (matchesExtra(e, tag, name)) return true;
+		for (const ExtraLib& e : _cfg.extraLibs) {
+			if (matchesExtra(e, tag, name)) {
+				return true;
+			}
+		}
 		return false;
 	};
 
 	QVector<Target> workspaceTargets;
 	QVector<QPair<QString, QString>> extras;		 // (tag, name) extra libraries
 	for (const Target& t : targets) {
-		if (isExtra(t.tag, t.name))
+		if (isExtra(t.tag, t.name)) {
 			extras.push_back({t.tag, t.name});
-		else
+		} else {
 			workspaceTargets.push_back(t);
+		}
 	}
 
 	QStringList lines;
-	for (const Target& target : workspaceTargets) lines << QString("  •  %1 @ %2  — workspace file").arg(target.name, target.tag);
-	for (const auto& e : extras) lines << QString("  •  %1 @ %2  — extra").arg(e.second, e.first);
+	for (const Target& target : workspaceTargets) {
+		lines << QString("  •  %1 @ %2  — workspace file").arg(target.name, target.tag);
+	}
+	for (const auto& e : extras) {
+		lines << QString("  •  %1 @ %2  — extra").arg(e.second, e.first);
+	}
 	const int count = workspaceTargets.size() + extras.size();
 
 	QString text = QString("Remove %1 from the workbench?\n\n%2\n\nThe analyzed .i64 and binaries on disk are NOT deleted.")
 					   .arg(Modules(count), lines.join('\n'));
-	if (!skipped.isEmpty())
+	if (!skipped.isEmpty()) {
 		text += QString("\n\nKeeping %1 of the %2 checked:\n%3").arg(skipped.size()).arg(Modules(selection.size()), SkipList(skipped, 12));
-	if (QMessageBox::warning(this, "Delete from workbench", text,
-			QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok)
+	}
+	if (QMessageBox::warning(this, "Delete from workbench", text, QMessageBox::Ok | QMessageBox::Cancel, QMessageBox::Cancel) != QMessageBox::Ok) {
 		return;
+	}
 	LogSkipped("delete", skipped);
 
 	ConfigView cfg = _cfg;
 	// Extra libraries: drop the exact (tag, name) entries.
-	for (const auto& e : extras)
-		for (int i = cfg.extraLibs.size() - 1; i >= 0; --i)
-			if (matchesExtra(cfg.extraLibs[i], e.first, e.second)) cfg.extraLibs.remove(i);
+	for (const auto& e : extras) {
+		for (int i = cfg.extraLibs.size() - 1; i >= 0; --i) {
+			if (matchesExtra(cfg.extraLibs[i], e.first, e.second)) {
+				cfg.extraLibs.remove(i);
+			}
+		}
+	}
 	for (const Target& target : workspaceTargets) {
 		auto removeFrom = [&target](QVector<Workspace>& workspaces) {
-			for (Workspace& workspace : workspaces)
-				if (workspace.tag == target.tag)
-					for (int i = workspace.files.size() - 1; i >= 0; --i)
-						if (QFileInfo(workspace.files[i]).completeBaseName() == target.name) workspace.files.remove(i);
+			for (Workspace& workspace : workspaces) {
+				if (workspace.tag == target.tag) {
+					for (int i = workspace.files.size() - 1; i >= 0; --i) {
+						if (QFileInfo(workspace.files[i]).completeBaseName() == target.name) {
+							workspace.files.remove(i);
+						}
+					}
+				}
+			}
 		};
 		removeFrom(cfg.workspaces);
 		removeFrom(cfg.steamWorkspaces);
-		for (int i = cfg.portOverrides.size() - 1; i >= 0; --i)
-			if (cfg.portOverrides[i].tag == target.tag && cfg.portOverrides[i].name == target.name) cfg.portOverrides.remove(i);
+		for (int i = cfg.portOverrides.size() - 1; i >= 0; --i) {
+			if (cfg.portOverrides[i].tag == target.tag && cfg.portOverrides[i].name == target.name) {
+				cfg.portOverrides.remove(i);
+			}
+		}
 	}
 
 	OnLog(QString("delete: removing %1 from the workbench (files on disk kept)").arg(Modules(count)));
@@ -2170,9 +2552,15 @@ void MainWindow::DoDelete() {
 }
 
 void MainWindow::OpenSettings() {
-	if (_stack->currentWidget() != _mainPage) return; // already in settings
-	if (!_activeOperations.isEmpty() || !_activeDepotTags.isEmpty()) return;
-	if (_refreshTimer) _refreshTimer->stop();		  // pause auto-Refresh while editing
+	if (_stack->currentWidget() != _mainPage) {
+		return; // already in settings
+	}
+	if (!_activeOperations.isEmpty() || !_activeDepotTags.isEmpty()) {
+		return;
+	}
+	if (_refreshTimer) {
+		_refreshTimer->stop(); // pause auto-Refresh while editing
+	}
 	_settingsPanel = new SettingsPanel(_cfg, this);
 	connect(_settingsPanel, &SettingsPanel::Cancelled, this, &MainWindow::CloseSettings);
 	connect(_settingsPanel, &SettingsPanel::Saved, this, [this](const ConfigView& v) {
@@ -2198,24 +2586,31 @@ void MainWindow::CloseSettings() {
 		_settingsPanel = nullptr;
 	}
 	UpdateSegmented(_view);
-	if (_refreshTimer) _refreshTimer->start(RefreshIntervalMs());
+	if (_refreshTimer) {
+		_refreshTimer->start(RefreshIntervalMs());
+	}
 }
 
 void MainWindow::ToggleAll() {
-	if (_busy) return;
+	if (_busy) {
+		return;
+	}
 	bool anyUnchecked = false;
-	for (int i = 0; i < _table->rowCount(); ++i)
+	for (int i = 0; i < _table->rowCount(); ++i) {
 		if (!_table->isRowHidden(i) && _table->item(i, COL_SEL)->checkState() != Qt::Checked) {
 			anyUnchecked = true;
 			break;
 		}
+	}
 	const Qt::CheckState s = anyUnchecked ? Qt::Checked : Qt::Unchecked;
 	for (int i = 0; i < _table->rowCount(); ++i) {
-		if (_table->isRowHidden(i)) continue;
+		if (_table->isRowHidden(i)) {
+			continue;
+		}
 		_table->item(i, COL_SEL)->setCheckState(s);
 		UpdateRowSelection(i);
 	}
-	static_cast<SelectHeader*>(_table->horizontalHeader())->setCheckState(s);
+	static_cast<SelectHeader*>(_table->horizontalHeader())->SetCheckState(s);
 	UpdateActionButtons();
 }
 
@@ -2223,24 +2618,32 @@ void MainWindow::ToggleAll() {
 // (an "extra library", same as the Settings section). It shows up under that tag
 // after the save round-trips through ConfigLoaded -> BuildTable.
 void MainWindow::AddBinary() {
-	if (_busy || !_activeDepotTags.isEmpty()) return;
+	if (_busy || !_activeDepotTags.isEmpty()) {
+		return;
+	}
 	// All files by default: extra libraries are exactly for one-offs whose
 	// extension may differ from the configured scan extensions.
 	const QString file = QFileDialog::getOpenFileName(
 		this, "Add a binary", QString(),
 		"All files (*)"
 	);
-	if (file.isEmpty()) return;
+	if (file.isEmpty()) {
+		return;
+	}
 
 	QStringList tagChoices = _tags; // offer the existing tags; a new one can be typed
-	if (tagChoices.isEmpty()) tagChoices << "extra";
+	if (tagChoices.isEmpty()) {
+		tagChoices << "extra";
+	}
 	bool ok = false;
 	const QString tag = QInputDialog::getItem(
 							this, "Add binary", QString("Tag for %1:").arg(QFileInfo(file).completeBaseName()),
 							tagChoices, 0, true, &ok
 	)
 							.trimmed();
-	if (!ok || tag.isEmpty()) return;
+	if (!ok || tag.isEmpty()) {
+		return;
+	}
 
 	const QString name = QFileInfo(file).completeBaseName();
 	if (InstanceExists(name, tag)) {
@@ -2273,23 +2676,31 @@ void MainWindow::ShowMcpData() {
 	};
 	QVector<Srv> list;
 	auto overrideFor = [this](const QString& tag, const QString& name) -> int {
-		for (const PortOverride& po : _cfg.portOverrides)
-			if (po.tag == tag && po.name == name) return po.port;
+		for (const PortOverride& po : _cfg.portOverrides) {
+			if (po.tag == tag && po.name == name) {
+				return po.port;
+			}
+		}
 		return 0;
 	};
-	for (const Workspace& sd : AllWorkspaces(_cfg))
+	for (const Workspace& sd : AllWorkspaces(_cfg)) {
 		for (int fileIndex = 0; fileIndex < sd.files.size(); ++fileIndex) {
 			const QString& file = sd.files[fileIndex];
 			const QString name = QFileInfo(file).completeBaseName();
-			if (name.isEmpty()) continue;
+			if (name.isEmpty()) {
+				continue;
+			}
 			const int ov = overrideFor(sd.tag, name);
 			const int port = ov > 0 ? ov : AutoScanPort(_cfg.basePort, fileIndex, sd.portOffset);
 			list.push_back({sd.tag, name, port});
 		}
+	}
 	for (int i = 0; i < _cfg.extraLibs.size(); ++i) {
 		const ExtraLib& e = _cfg.extraLibs[i];
 		const QString name = QFileInfo(e.path).completeBaseName();
-		if (e.tag.isEmpty() || name.isEmpty()) continue;
+		if (e.tag.isEmpty() || name.isEmpty()) {
+			continue;
+		}
 		const int port = e.port > 0 ? e.port : AutoExtraPort(_cfg.basePort, i);
 		list.push_back({e.tag, name, port});
 	}
@@ -2307,15 +2718,22 @@ void MainWindow::ShowMcpData() {
 	};
 	auto payloadFor = [&list, &host](const QString& selectedTag) {
 		QVector<Srv> filtered;
-		for (const Srv& server : list)
-			if (selectedTag.isEmpty() || server.tag == selectedTag) filtered.push_back(server);
+		for (const Srv& server : list) {
+			if (selectedTag.isEmpty() || server.tag == selectedTag) {
+				filtered.push_back(server);
+			}
+		}
 
 		QHash<QString, int> nameCount;
-		for (const Srv& server : filtered) nameCount[server.name]++;
+		for (const Srv& server : filtered) {
+			nameCount[server.name]++;
+		}
 		QVector<QPair<QString, QString>> servers;
 		for (const Srv& server : filtered) {
 			QString key = "ida-mcp-" + server.name;
-			if (nameCount.value(server.name) > 1) key += "-" + server.tag;
+			if (nameCount.value(server.name) > 1) {
+				key += "-" + server.tag;
+			}
 			servers.push_back({key, QString("http://%1:%2/mcp").arg(host).arg(server.port)});
 		}
 
@@ -2371,9 +2789,14 @@ void MainWindow::ShowMcpData() {
 	auto* tagCombo = Ui::ComboBox();
 	tagCombo->addItem("All", QString());
 	QStringList tags;
-	for (const Srv& server : list)
-		if (!tags.contains(server.tag)) tags << server.tag;
-	for (const QString& tag : tags) tagCombo->addItem(tag, tag);
+	for (const Srv& server : list) {
+		if (!tags.contains(server.tag)) {
+			tags << server.tag;
+		}
+	}
+	for (const QString& tag : tags) {
+		tagCombo->addItem(tag, tag);
+	}
 	auto* tagField = Ui::ComboField("Tag", tagCombo);
 	tagField->setFixedWidth(190);
 	header->addWidget(tagField, 0, Qt::AlignVCenter);
@@ -2456,8 +2879,9 @@ void MainWindow::ShowMcpData() {
 
 	// Check-mark the active tab (same cue the main window uses on its tag tabs).
 	auto markActive = [tabBar] {
-		for (int i = 0; i < tabBar->count(); ++i)
+		for (int i = 0; i < tabBar->count(); ++i) {
 			tabBar->setTabIcon(i, i == tabBar->currentIndex() ? Ui::Icon("check", Pal::SEG_ACTIVE, 16) : QIcon());
+		}
 	};
 	connect(tabBar, &QTabBar::currentChanged, &dlg, [markActive, pages](int index) {
 		pages->setCurrentIndex(index);
@@ -2478,7 +2902,9 @@ void MainWindow::ShowMcpData() {
 	auto* copyBtn = Ui::IconButton("content_copy", "Copy to clipboard"); // filled primary
 	auto* saveBtn = Ui::IconButton("download", "Save as file…", "tonal");
 	auto* closeBtn = Ui::IconButton("close", "Close", "outlined");
-	for (QPushButton* b : {copyBtn, saveBtn, closeBtn}) Ui::ClipRounded(b, 20.0);
+	for (QPushButton* b : {copyBtn, saveBtn, closeBtn}) {
+		Ui::ClipRounded(b, 20.0);
+	}
 	auto* footer = new QHBoxLayout;
 	footer->setSpacing(10);
 	footer->addWidget(copyBtn);
@@ -2495,11 +2921,14 @@ void MainWindow::ShowMcpData() {
 	connect(saveBtn, &QPushButton::clicked, &dlg, [&dlg, tabBar, &tabData] {
 		const TabData& td = tabData[tabBar->currentIndex()];
 		const QString path = QFileDialog::getSaveFileName(&dlg, "Save MCP config", QDir(QDir::homePath()).filePath(td.saveName), td.saveFilter);
-		if (path.isEmpty()) return;
+		if (path.isEmpty()) {
+			return;
+		}
 		QSaveFile f(path);
 		const QByteArray bytes = td.content.toUtf8();
-		if (!(f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size() && f.commit()))
+		if (!(f.open(QIODevice::WriteOnly) && f.write(bytes) == bytes.size() && f.commit())) {
 			QMessageBox::warning(&dlg, "Save as file", "Could not write " + QDir::toNativeSeparators(path));
+		}
 	});
 	connect(closeBtn, &QPushButton::clicked, &dlg, &QDialog::accept);
 

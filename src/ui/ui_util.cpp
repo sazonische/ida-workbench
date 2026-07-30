@@ -153,7 +153,7 @@ namespace {
 			setAttribute(Qt::WA_TranslucentBackground);
 			setAutoFillBackground(false);
 			target->installEventFilter(this);
-			syncGeometry();
+			SyncGeometry();
 			show();
 			raise();
 		}
@@ -161,7 +161,7 @@ namespace {
 	protected:
 		bool eventFilter(QObject* watched, QEvent* event) override {
 			if (watched == _target && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
-				syncGeometry();
+				SyncGeometry();
 				raise();
 			}
 			return QWidget::eventFilter(watched, event);
@@ -176,7 +176,7 @@ namespace {
 		}
 
 	private:
-		void syncGeometry() { setGeometry(_target->rect()); }
+		void SyncGeometry() { setGeometry(_target->rect()); }
 		QWidget* _target;
 		qreal _radius;
 		QColor _color;
@@ -187,19 +187,19 @@ namespace {
 		RoundedMaskFilter(QWidget* target, qreal radius) :
 			QObject(target), _target(target), _radius(radius) {
 			target->installEventFilter(this);
-			applyMask();
+			ApplyMask();
 		}
 
 	protected:
 		bool eventFilter(QObject* watched, QEvent* event) override {
 			if (watched == _target && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
-				applyMask();
+				ApplyMask();
 			}
 			return QObject::eventFilter(watched, event);
 		}
 
 	private:
-		void applyMask() {
+		void ApplyMask() {
 			QPainterPath path;
 			path.addRoundedRect(QRectF(_target->rect()), _radius, _radius);
 			_target->setMask(QRegion(path.toFillPolygon().toPolygon()));
@@ -224,25 +224,25 @@ namespace {
 				_overlay->setPageStep(model->pageStep());
 				_overlay->setSingleStep(model->singleStep());
 				_overlay->setVisible(maximum > minimum);
-				syncGeometry();
+				SyncGeometry();
 				_overlay->raise();
 			});
 			connect(model, &QScrollBar::valueChanged, _overlay, &QScrollBar::setValue);
 			connect(_overlay, &QScrollBar::valueChanged, model, &QScrollBar::setValue);
-			syncGeometry();
+			SyncGeometry();
 		}
 
 	protected:
 		bool eventFilter(QObject* watched, QEvent* event) override {
 			if (watched == _target && (event->type() == QEvent::Resize || event->type() == QEvent::Show)) {
-				syncGeometry();
+				SyncGeometry();
 				_overlay->raise();
 			}
 			return QObject::eventFilter(watched, event);
 		}
 
 	private:
-		void syncGeometry() {
+		void SyncGeometry() {
 			_overlay->setGeometry(_target->width() - 13, _topInset, 10, qMax(0, _target->height() - _topInset - 4));
 		}
 		QAbstractScrollArea* _target;
@@ -401,7 +401,7 @@ namespace Ui {
 
 	static QString kFamily, kFamilyFill;
 
-	static const QHash<QString, ushort>& codepoints() {
+	static const QHash<QString, ushort>& Codepoints() {
 		static const QHash<QString, ushort> m = {
 			{"hub", 0xe9f4},
 			{"dns", 0xe875},
@@ -455,7 +455,7 @@ namespace Ui {
 	}
 
 	QString Sym(const QString& name) {
-		const ushort codepoint = codepoints().value(name, 0);
+		const ushort codepoint = Codepoints().value(name, 0);
 		return codepoint ? QString(QChar(codepoint)) : QString();
 	}
 

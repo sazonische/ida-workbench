@@ -28,8 +28,7 @@ private:
 	void AddSteamWorkspace();
 	void EditFiles(QTableWidget* table, int row);
 	void EditDepot(int row);
-	void PickTagColor(int row);
-	void PickExtraColor(int row);
+	void PickTagColor(QTableWidget* table, int row, int column);
 	void AddExtraFile();
 
 	QLineEdit* _host = nullptr;

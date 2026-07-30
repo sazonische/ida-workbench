@@ -82,6 +82,8 @@ Later, when one file is not enough, open **Settings** and give a tag a source/ou
 
 Closing the window hides the app in the tray (servers keep running); Exit lives in the tray menu. A second launch just activates the first window.
 
+A few seconds after startup the app asks GitHub for its newest release and, if there is one, offers the release page. **Skip** remembers that version and never mentions it again — the next one still will. Being offline is a single line in the log, never a dialog.
+
 ## Concepts
 
 - **Tag** — a named group: `app-current`, `driver-v2`, `samples`. It groups binaries, carries a color, and offsets its ports. Tags are what an assistant sees in the endpoint names, so they should read like identities.
@@ -141,7 +143,9 @@ workspace module:  scanBasePort + module slot + tag portOffset
 single library:    scanBasePort + 1000 + library index
 ```
 
-Double-clicking the Port cell pins a single `(tag, module)` pair to an exact port, stored in `portOverrides` so it survives restarts. Collisions are rejected when the config is saved, not when a server fails to bind.
+Double-clicking the Port cell pins a single `(tag, module)` pair to an exact port, stored in `portOverrides` so it survives restarts. Ports below 1024 are refused — binding them needs privileges Workbench does not have — and collisions are rejected when the config is saved, not when a server fails to bind.
+
+A single library's port is written into `config.json` on the first save rather than recomputed from its position, so removing another library never renumbers the rest and endpoints you have already pasted into a client keep working. Base port still drives workspace modules and libraries added later.
 
 ## Operations
 
@@ -159,7 +163,7 @@ Checked rows are a **scope, not a promise**: a workspace's file list is a wish l
 
 ## Data and logs
 
-Everything the app owns lives in `%USERPROFILE%/.ida-workbench/`: `config.json`, `ui-state.json` (window layout), the log, and the helper scripts unpacked from the exe. The GUI, the analyzers and every MCP server write to the **same** log file through a lock file, in one line format, so a failing server and the operation that started it read in order. `maxLogSizeMB` trims the oldest lines.
+Everything the app owns lives in `%USERPROFILE%/.ida-workbench/`: `config.json`, `ui-state.json` (window layout and the update version you declined), the log, and the helper scripts unpacked from the exe. The GUI, the analyzers and every MCP server write to the **same** log file through a lock file, in one line format, so a failing server and the operation that started it read in order. `maxLogSizeMB` trims the oldest lines.
 
 ## Steam depots
 
