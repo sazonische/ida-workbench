@@ -57,6 +57,10 @@ jobs:
     needs: meta
     runs-on: windows-2025
     timeout-minutes: 360 # a cold qtbase build is measured in hours, not minutes
+    permissions:
+      contents: read
+      id-token: write     # both needed by the build provenance attestation below
+      attestations: write
     steps:
       - uses: actions/checkout@v4
 
@@ -162,6 +166,17 @@ jobs:
           # Logged so a jump in size (a stray Qt feature dragging icu back in) is visible
           # in the run output instead of only in the download.
           "exe size: {0:N1} MB" -f ((Get-Item $exe).Length / 1MB)
+
+      # The free stand-in for code signing. A certificate costs more per year than this
+      # tool earns, so SmartScreen will warn on first run no matter what CI does; an
+      # attestation at least lets anyone prove the exe came out of this workflow, from
+      # this commit — `gh attestation verify <exe> --repo <owner>/<repo>`. Skipped for
+      # pull requests, where the token cannot mint one.
+      - name: Attest build provenance
+        if: github.event_name == 'push'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ida-workbench-${{ needs.meta.outputs.version }}-windows-x64.exe
 
       - uses: actions/upload-artifact@v4
         with:

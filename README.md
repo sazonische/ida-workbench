@@ -80,6 +80,20 @@ The three chips in the header report exactly these: IDA (`ida.exe` + `idat.exe` 
 
 Later, when one file is not enough, open **Settings** and give a tag a source/output folder pair (or a Steam depot) to get versioning on top.
 
+### The SmartScreen warning on first run
+
+The release exe is not code-signed: a code-signing certificate costs more per year than a free tool earns, so Windows shows *"Windows protected your PC"* the first time you run a fresh download. Click **More info → Run anyway**, or clear the download mark first:
+
+```powershell
+Unblock-File .\ida-workbench-<version>-windows-x64.exe
+```
+
+If you would rather verify than trust a button, each release asset shows its SHA-256 on the release page, and every build carries a GitHub provenance attestation — this proves the exact file came out of the workflow in this repository, from a specific commit:
+
+```powershell
+gh attestation verify .\ida-workbench-<version>-windows-x64.exe --repo sazonische/ida-workbench
+```
+
 Closing the window hides the app in the tray (servers keep running); Exit lives in the tray menu. A second launch just activates the first window.
 
 A few seconds after startup the app asks GitHub for its newest release and, if there is one, offers the release page. **Skip** remembers that version and never mentions it again — the next one still will. Being offline is a single line in the log, never a dialog.
