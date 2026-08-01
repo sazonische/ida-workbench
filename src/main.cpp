@@ -1,12 +1,14 @@
 #include "logging.h"
 #include "main_window.h"
 #include "manager.h"
+#include "paths.h"
 #include "theme.h"
 #include "ui_util.h"
 #include "version.h"
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QFile>
 #include <QFont>
 #include <QIcon>
 #include <QLocalServer>
@@ -17,6 +19,23 @@ namespace {
 	QString InstanceServerName() {
 		const QByteArray userKey = QCryptographicHash::hash(QDir::homePath().toUtf8(), QCryptographicHash::Sha256).toHex().left(16);
 		return "ida-workbench-" + QString::fromLatin1(userKey);
+	}
+
+	// The log used to sit directly in the app folder, next to config.json. Carry it into
+	// logs/ before this session writes its first line — a moment later the destination
+	// exists and the old history would have to be spliced into it instead of moved.
+	// Layout only: config.json has not been read yet, and an install with a custom logDir
+	// simply has nothing here to move. A failed rename (a server from a previous session
+	// still holding the file) leaves the destination absent, so the next launch retries.
+	void MigrateLegacyLogFile() {
+		const QString legacy = QDir(Paths::AppHome()).filePath(Log::FileName());
+		const QString target = QDir(Paths::DefaultLogDir()).filePath(Log::FileName());
+		if (!QFile::exists(legacy) || QFile::exists(target) || !QDir().mkpath(Paths::DefaultLogDir())) {
+			return;
+		}
+		if (QFile::rename(legacy, target)) {
+			QFile::remove(legacy + ".lock"); // one-byte sentinel, recreated on demand
+		}
 	}
 
 	bool ActivateRunningInstance(const QString& serverName, int timeoutMs = 500) {
@@ -59,9 +78,11 @@ int main(int argc, char* argv[]) {
 	}
 
 	// Canonical log first: everything the in-app LOG panel shows plus the Qt
-	// diagnostics it does not are appended to one file. The manager re-points this
-	// to the configured logDir once config.json loads (it defaults to the same folder).
-	Log::Configure(QDir(QDir::homePath() + "/.ida-workbench").filePath(Log::FileName()), 10);
+	// diagnostics it does not are appended to one file. Starts at the default location
+	// because config.json has not been read yet; the manager re-points this to the
+	// configured logDir once it loads, which for a default install is the same folder.
+	MigrateLegacyLogFile();
+	Log::Configure(QDir(Paths::DefaultLogDir()).filePath(Log::FileName()), 10);
 	Log::InstallQtMessageHandler();
 	Log::SessionBanner(app.applicationName(), app.applicationVersion());
 

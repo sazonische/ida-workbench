@@ -102,15 +102,24 @@ def _main():
     if plug not in sys.path:
         sys.path.insert(0, plug)
 
-    from ida_mcp import (MCP_SERVER, IdaMcpHttpRequestHandler,
-                         init_caches, set_local_instance)
-    try:
-        init_caches()
-    except Exception as e:
-        _log(f"cache init failed: {e}", "WARN")
+    # Only the server and its handler are load-bearing. The rest of ida_mcp's
+    # surface drifts between plugin versions (set_local_instance was dropped
+    # upstream), and a single `from ... import` would take the whole server down
+    # with one missing optional name -- so those are resolved individually.
+    import ida_mcp
+    from ida_mcp import MCP_SERVER, IdaMcpHttpRequestHandler
+
+    init_caches = getattr(ida_mcp, "init_caches", None)
+    set_local_instance = getattr(ida_mcp, "set_local_instance", None)
+    if init_caches:
+        try:
+            init_caches()
+        except Exception as e:
+            _log(f"cache init failed: {e}", "WARN")
 
     MCP_SERVER.serve(host, port, request_handler=IdaMcpHttpRequestHandler)
-    set_local_instance(host, port)
+    if set_local_instance:
+        set_local_instance(host, port)
     try:
         import idc
         from ida_mcp.discovery import register_instance

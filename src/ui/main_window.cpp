@@ -2,6 +2,7 @@
 #include "delegates.h"
 #include "logging.h"
 #include "palette.h"
+#include "paths.h"
 #include "settings_panel.h"
 #include "ui_util.h"
 #include "version.h"
@@ -379,16 +380,11 @@ static const qint64 kStartGraceMs = 240000;
 // The Refresh glyph rotated by `angle`, spun in place via the shared helper.
 static QIcon SpunRefreshIcon(int angle) { return Ui::SpinningIcon("refresh", 20, Pal::ON_SURFACE_VARIANT, angle); }
 
-// config.json always lives in the user's data folder so it survives rebuilds and
-// app updates and there is exactly one place to look.
-static QString UserConfigHome() { return QDir::homePath() + "/.ida-workbench"; }
-static QString ConfigFilePath() { return QDir(UserConfigHome()).filePath("config.json"); }
-
-// Pure-UI layout preferences (splitter position, …) live in their own small file
-// next to config.json, so resizing a panel never rewrites the app configuration.
-static QString UiStatePath() { return QDir(UserConfigHome()).filePath("ui-state.json"); }
+// config.json and the pure-UI layout preferences (splitter position, …) both live in
+// the app folder — see Paths:: for why that folder no longer holds the logs. They are
+// separate files so resizing a panel never rewrites the app configuration.
 static QJsonObject ReadUiState() {
-	QFile f(UiStatePath());
+	QFile f(Paths::UiStateFile());
 	if (!f.open(QIODevice::ReadOnly)) {
 		return {};
 	}
@@ -400,7 +396,7 @@ static QJsonObject ReadUiState() {
 static void StoreUiState(const QString& key, const QJsonValue& value) {
 	QJsonObject state = ReadUiState();
 	state[key] = value;
-	QSaveFile f(UiStatePath());
+	QSaveFile f(Paths::UiStateFile());
 	if (f.open(QIODevice::WriteOnly)) {
 		f.write(QJsonDocument(state).toJson(QJsonDocument::Compact));
 		f.commit();
@@ -734,7 +730,7 @@ MainWindow::MainWindow(QWidget* parent) :
 
 	_mgr = new Manager;
 	QString err;
-	const QString cfg = ConfigFilePath();
+	const QString cfg = Paths::ConfigFile();
 	// First run (or the file was deleted): write a clean, loadable default so the
 	// app opens ready to edit instead of failing. IDA is auto-detected if present.
 	if (!QFile::exists(cfg)) {

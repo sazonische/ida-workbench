@@ -117,7 +117,7 @@ Everything lives in one file, `%USERPROFILE%/.ida-workbench/config.json`, and th
     "text": "C:/Program Files/IDA Professional 9.2/idat.exe"
   },
   "analysisArgs": "",
-  "logDir": "~/.ida-workbench",
+  "logDir": "~/.ida-workbench/logs",
   "scanBasePort": 8500,
   "maxLogSizeMB": 10,
 
@@ -177,7 +177,11 @@ Checked rows are a **scope, not a promise**: a workspace's file list is a wish l
 
 ## Data and logs
 
-Everything the app owns lives in `%USERPROFILE%/.ida-workbench/`: `config.json`, `ui-state.json` (window layout and the update version you declined), the log, and the helper scripts unpacked from the exe. The GUI, the analyzers and every MCP server write to the **same** log file through a lock file, in one line format, so a failing server and the operation that started it read in order. `maxLogSizeMB` trims the oldest lines.
+Everything the app owns lives in `%USERPROFILE%/.ida-workbench/`: `config.json`, `ui-state.json` (window layout and the update version you declined), and the helper scripts unpacked from the exe. Logs are output rather than program files, so they get their own folder — `logs/` — and you can clear it whenever you like. Upgrading from a version that logged into the app folder moves the existing log there for you.
+
+The GUI, the analyzers and every MCP server write to the **same** log file through a lock file, in one line format, so a failing server and the operation that started it read in order. `maxLogSizeMB` trims the oldest lines. Point `logDir` anywhere you want; the one place it will not stay is the app folder itself, which is redirected back into `logs/`.
+
+The helper scripts (`start_mcp.py`, `analyze_ida.py`, `disable_autostart.py`) are rewritten from the exe **once per app version** — the version that last did it is recorded in `.scripts-version`. So you can patch one in place, for instance when a new ida-pro-mcp renames something before a Workbench release catches up, and your edit stays until the next update. Delete a script and it comes back on the next launch.
 
 ## Steam depots
 

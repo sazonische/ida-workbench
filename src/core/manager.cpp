@@ -1,6 +1,7 @@
 #include "manager.h"
 
 #include "logging.h"
+#include "paths.h"
 #include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -498,35 +499,91 @@ static void ReadSteamVersions(const QString& steamInfPath, QString* patchVersion
 	}
 }
 
+// Records which app version last materialised the helper scripts, next to them.
+static const char* const kScriptStampFile = ".scripts-version";
+
 // The static build is a single exe, but the Python glue it drives (start_mcp.py /
 // analyze_ida.py / disable_autostart.py) are sidecar files. They are embedded as
 // resources and re-materialised next to config.json — an always-writable folder —
-// so copying just the exe to another machine still works. Only rewrites when the
-// bundled copy differs, so it stays in lockstep with the exe without clobbering on
-// every launch. Silently no-ops in builds without the resource (e.g. unit tests).
+// so copying just the exe to another machine still works.
+//
+// The refresh is keyed on the app version, not on file contents: the bundled copies
+// win exactly once per version, and a local edit made afterwards survives every later
+// launch. Comparing contents on every start (the older behaviour) reverted such an
+// edit on the next launch, which left anyone on an already-released build unable to
+// patch a broken helper at all — and the helpers break from the outside, when
+// ida-pro-mcp renames something. A missing file is still restored no matter what the
+// stamp says: that self-heal is what makes a bare copied exe work. Silently no-ops in
+// builds without the resource (e.g. unit tests).
 static void EnsureHelperScripts(const QString& destDir) {
 	QDir().mkpath(destDir);
+	const QString version = QCoreApplication::applicationVersion();
+	QString stamp;
+	QFile stampFile(QDir(destDir).filePath(kScriptStampFile));
+	if (stampFile.open(QIODevice::ReadOnly)) {
+		stamp = QString::fromUtf8(stampFile.readAll()).trimmed();
+		stampFile.close();
+	}
+	const bool refresh = stamp != version;
+	bool haveResource = false;
+	QStringList written;
 	for (const char* name : {"start_mcp.py", "analyze_ida.py", "disable_autostart.py"}) {
+		const QString dest = QDir(destDir).filePath(name);
+		const bool present = QFile::exists(dest);
+		if (present && !refresh) {
+			continue; // this version already deployed its copy — keep any local edit
+		}
 		QFile bundled(QString(":/scripts/%1").arg(name));
 		if (!bundled.open(QIODevice::ReadOnly)) {
 			continue; // resource absent (tests) — leave any on-disk copy
 		}
+		haveResource = true;
 		const QByteArray data = bundled.readAll();
-		const QString dest = QDir(destDir).filePath(name);
-		QFile existing(dest);
-		if (existing.exists() && existing.open(QIODevice::ReadOnly)) {
-			const bool current = existing.readAll() == data;
-			existing.close();
-			if (current) {
-				continue; // already up to date
+		if (present) {
+			QFile existing(dest);
+			if (existing.open(QIODevice::ReadOnly) && existing.readAll() == data) {
+				continue; // identical — not worth a write or a log line
 			}
 		}
 		QSaveFile out(dest);
+		if (out.open(QIODevice::WriteOnly) && out.write(data) == data.size() && out.commit()) {
+			written << QString::fromLatin1(name);
+		}
+	}
+	if (!written.isEmpty()) {
+		Log::Write(Log::Level::Info,
+			QString("[scripts] refreshed for %1: %2").arg(version, written.join(", ")));
+	}
+	// Stamp only once the resource proved readable, so a build without it cannot claim
+	// a version it never deployed and suppress the refresh for a build that has it.
+	if (refresh && haveResource) {
+		QSaveFile out(QDir(destDir).filePath(kScriptStampFile));
 		if (out.open(QIODevice::WriteOnly)) {
-			out.write(data);
+			out.write(version.toUtf8());
 			out.commit();
 		}
 	}
+}
+
+// The app folder is for program files, so it is never also the log folder: a `logDir`
+// pointing straight at it is redirected into logs/ underneath. That is where older
+// installs logged — nobody picked the path, it was simply the default of the day — and
+// keeping it as a standing rule rather than a one-shot migration means the two roles
+// cannot quietly merge back together later. Any other logDir is the user's choice and is
+// left exactly as written. The log file itself is carried over in main(), before this
+// session writes its first line. Returns true when the caller must persist the change.
+static bool RedirectLogDirOutOfAppHome(QString* logDir) {
+	auto key = [](const QString& path) {
+		return QDir::cleanPath(QFileInfo(path).absoluteFilePath()).toLower();
+	};
+	if (key(*logDir) != key(Paths::AppHome())) {
+		return false;
+	}
+	if (!QDir().mkpath(Paths::DefaultLogDir())) {
+		return false; // keep logging where it demonstrably works
+	}
+	*logDir = Paths::DefaultLogDir();
+	return true;
 }
 
 Manager::Manager(QObject* parent) :
@@ -564,7 +621,8 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 	const QJsonObject ida = c.value("ida").toObject();
 	next.idaGui = ExpandUserPath(ida.value("gui").toString());
 	next.idaText = ExpandUserPath(ida.value("text").toString());
-	next.logDir = ExpandUserPath(c.value("logDir").toString("~/.ida-workbench"));
+	next.logDir = ExpandUserPath(c.value("logDir").toString(Paths::DefaultLogDirSetting()));
+	const bool logDirMigrated = RedirectLogDirOutOfAppHome(&next.logDir);
 	next.analysisArgs = c.value("analysisArgs").toString().trimmed();
 	const int bp = c.value("scanBasePort").toInt(DEFAULT_BASE_PORT);
 	next.basePort = (bp >= 1024 && bp <= 60000) ? bp : DEFAULT_BASE_PORT;
@@ -655,7 +713,7 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 				&workspace.depot.patchVersion, &workspace.depot.serverVersion);
 		}
 	}
-	bool schemaNeedsWrite = generatedColors || !c.contains("analysisArgs") || !c.contains("depotDownloader") || !c.contains("steamWorkspaces");
+	bool schemaNeedsWrite = generatedColors || logDirMigrated || !c.contains("analysisArgs") || !c.contains("depotDownloader") || !c.contains("steamWorkspaces");
 	for (const QJsonValue value : c.value("workspaces").toArray()) {
 		const QJsonObject object = value.toObject();
 		if (!object.contains("color") || !object.contains("portOffset")) {
@@ -666,6 +724,10 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 		QHash<QString, QString> extraColors;
 		for (const ExtraLib& extra : next.extraLibs) {
 			extraColors.insert(extra.tag + '\t' + extra.path, extra.color);
+		}
+		if (logDirMigrated) {
+			// Tilde form, not the expanded path: config.json stays portable.
+			c["logDir"] = Paths::DefaultLogDirSetting();
 		}
 		c["analysisArgs"] = next.analysisArgs;
 		c["depotDownloader"] = QJsonObject{{"executable", next.depotDownloader.executable}, {"timeoutMinutes", next.depotDownloader.timeoutMinutes}};
@@ -726,6 +788,11 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 	RebuildInstances();
 	// Point the canonical log at the configured folder and apply the size cap.
 	Log::Configure(QDir(_logDir).filePath(Log::FileName()), _maxLogMB);
+	if (logDirMigrated) {
+		// Written after the re-point, so the note lands in the folder it talks about.
+		Log::Write(Log::Level::Info,
+			QString("[config] logs moved out of the app folder into %1").arg(QDir::toNativeSeparators(_logDir)));
+	}
 	qDebug().noquote() << QString("[config] loaded %1 · ida=%2 · idat=%3 · basePort=%4 · workspaces=%5")
 							  .arg(QFileInfo(path).absoluteFilePath(), _idaGui, _idaText)
 							  .arg(_basePort)
@@ -741,7 +808,7 @@ bool Manager::CreateDefaultConfig(const QString& path, QString* err) {
 	QJsonObject root;
 	root["host"] = "127.0.0.1";
 	root["ida"] = QJsonObject{{"gui", gui}, {"text", text}};
-	root["logDir"] = "~/.ida-workbench";
+	root["logDir"] = Paths::DefaultLogDirSetting();
 	root["scanBasePort"] = DEFAULT_BASE_PORT;
 	root["maxLogSizeMB"] = DEFAULT_MAX_LOG_MB;
 	root["analysisArgs"] = "";
