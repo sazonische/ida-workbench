@@ -1,11 +1,19 @@
 cmake_minimum_required(VERSION 3.19)
-project(ida_workbench VERSION 1.3.0 LANGUAGES CXX)
+project(ida_workbench VERSION 2.0.0 LANGUAGES CXX)
 
 # The app version -> generated header (src/version.h in the build dir), shown in
 # Settings ▸ About and the window footer. project(VERSION) above is the default, used by
 # every local build; CI overrides it with the tag it is releasing, so a downloaded exe
 # always reports the version of the release it came in — no file edit per release.
 set(IDA_WORKBENCH_VERSION "${PROJECT_VERSION}" CACHE STRING "Version the app reports")
+# Windows file properties must report the same version as the app and release.
+# Keep an optional local suffix in the string fields; VERSIONINFO needs numbers.
+if (NOT IDA_WORKBENCH_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)")
+    message(FATAL_ERROR "IDA_WORKBENCH_VERSION must start with MAJOR.MINOR.PATCH")
+endif()
+set(IDA_WORKBENCH_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(IDA_WORKBENCH_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(IDA_WORKBENCH_VERSION_PATCH "${CMAKE_MATCH_3}")
 configure_file(src/version.h.in "${CMAKE_CURRENT_BINARY_DIR}/generated/version.h" @ONLY)
 
 set(CMAKE_CXX_STANDARD 23)
@@ -29,6 +37,7 @@ qt_standard_project_setup()
 qt_add_executable(ida-workbench
     src/main.cpp
     src/core/manager.cpp
+    src/core/mcp_client.cpp
     src/core/logging.cpp
     src/ui/main_window.cpp
     src/ui/settings_panel.cpp
@@ -65,9 +74,7 @@ qt_add_resources(ida-workbench "assets"
 qt_add_resources(ida-workbench "scripts"
     PREFIX "/scripts"
     FILES
-        start_mcp.py
         analyze_ida.py
-        disable_autostart.py
 )
 
 # Embed the .ico into the exe itself (taskbar / Explorer icon) via a resource script.
@@ -79,7 +86,7 @@ endif()
 
 target_link_libraries(ida-workbench PRIVATE Qt6::Widgets Qt6::Network)
 if (WIN32)
-    target_link_libraries(ida-workbench PRIVATE dwmapi iphlpapi)
+    target_link_libraries(ida-workbench PRIVATE dwmapi version)
 endif()
 
 # GUI subsystem: no console window on Windows (logs go to the in-app panel).
@@ -87,6 +94,12 @@ set_target_properties(ida-workbench PROPERTIES WIN32_EXECUTABLE ON)
 
 include(CTest)
 if (BUILD_TESTING)
+	add_executable(fake-mcp tests/fake_mcp.cpp)
+	target_link_libraries(fake-mcp PRIVATE Qt6::Core)
+	add_executable(mcp-tests tests/mcp_tests.cpp src/core/mcp_client.cpp src/core/manager.cpp src/core/logging.cpp)
+	target_include_directories(mcp-tests PRIVATE src src/core)
+	target_link_libraries(mcp-tests PRIVATE Qt6::Core Qt6::Network)
+	add_test(NAME official-mcp-leases COMMAND mcp-tests $<TARGET_FILE:fake-mcp>)
 	add_executable(fake-depot tests/fake_depot.cpp)
 	target_link_libraries(fake-depot PRIVATE Qt6::Core)
 	add_executable(fake-analyzer tests/fake_analyzer.cpp)
@@ -94,6 +107,7 @@ if (BUILD_TESTING)
 	add_executable(manager-config-tests
         tests/manager_config_tests.cpp
         src/core/manager.cpp
+    src/core/mcp_client.cpp
         src/core/logging.cpp
     )
     target_include_directories(manager-config-tests PRIVATE src src/core)
@@ -104,13 +118,14 @@ if (BUILD_TESTING)
 	target_link_libraries(logging-tests PRIVATE Qt6::Core)
 	add_test(NAME shared-log-tail-trimming COMMAND logging-tests)
     if (WIN32)
-		target_link_libraries(manager-config-tests PRIVATE iphlpapi)
+		target_link_libraries(manager-config-tests PRIVATE version)
+		target_link_libraries(mcp-tests PRIVATE version)
         get_target_property(QT_CORE_RUNTIME Qt6::Core IMPORTED_LOCATION_RELEASE)
         if (NOT QT_CORE_RUNTIME)
             get_target_property(QT_CORE_RUNTIME Qt6::Core IMPORTED_LOCATION)
         endif()
         get_filename_component(QT_RUNTIME_DIR "${QT_CORE_RUNTIME}" DIRECTORY)
-        set_tests_properties(manager-workspace-revisions shared-log-tail-trimming PROPERTIES
+        set_tests_properties(manager-workspace-revisions shared-log-tail-trimming official-mcp-leases PROPERTIES
             ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:${QT_RUNTIME_DIR}")
     endif()
 endif()

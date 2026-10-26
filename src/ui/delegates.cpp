@@ -6,7 +6,6 @@
 #include <QColor>
 #include <QFontMetricsF>
 #include <QPainter>
-#include <QSpinBox>
 #include <QStyle>
 #include <QTableWidget>
 
@@ -140,9 +139,9 @@ void ChipDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, 
 	const QRect content = ContentRect(option, index);
 	const int pillHeight = qMin(content.height() - 10, 24);
 
-	if (text == "UP" || text == "down") {
+	if (text == "ATTACHED" || text == "SHARED" || text == "closed") {
 		// outlined pill with a leading status dot
-		const bool isUp = (text == "UP");
+		const bool isUp = (text != "closed");
 		const int textWidth = fontMetrics.horizontalAdvance(text);
 		const int pillWidth = textWidth + 30;
 		QRect pill(0, 0, pillWidth, pillHeight);
@@ -158,7 +157,7 @@ void ChipDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, 
 		painter->drawEllipse(QPoint(dotCenterX, dotCenterY), dotRadius, dotRadius);
 		painter->setPen(Pal::ON_SURFACE_VARIANT);
 		painter->drawText(QRect(dotCenterX + 8, pill.top(), pill.right() - (dotCenterX + 8) - 8, pill.height()), Qt::AlignVCenter | Qt::AlignHCenter, text);
-	} else if (text.startsWith("Analyzing") || text.startsWith("Starting") || text.startsWith("Downloading")) {
+	} else if (text.startsWith("Analyzing") || text.startsWith("Opening") || text.startsWith("Releasing") || text.startsWith("Downloading")) {
 		// in-progress chip with a spinning arrow (angle driven by the table's timer)
 		const QColor foregroundColor = Pal::PRIMARY;
 		const int textWidth = fontMetrics.horizontalAdvance(text);
@@ -264,26 +263,4 @@ void TagDelegate::paint(QPainter* painter, const QStyleOptionViewItem& option, c
 	painter->setPen(foregroundColor);
 	painter->drawText(chip, Qt::AlignCenter, text);
 	painter->restore();
-}
-
-PortOffsetDelegate::PortOffsetDelegate(QObject* parent, int minimum, int maximum) :
-	QStyledItemDelegate(parent), _minimum(minimum), _maximum(maximum) {
-}
-
-QWidget* PortOffsetDelegate::createEditor(QWidget* parent, const QStyleOptionViewItem&, const QModelIndex&) const {
-	auto* editor = new QSpinBox(parent);
-	editor->setRange(_minimum, _maximum);
-	editor->setButtonSymbols(QAbstractSpinBox::NoButtons); // no up/down arrows — type the value
-	editor->setFrame(false);
-	return editor;
-}
-
-void PortOffsetDelegate::setEditorData(QWidget* editor, const QModelIndex& index) const {
-	static_cast<QSpinBox*>(editor)->setValue(index.data(Qt::EditRole).toInt());
-}
-
-void PortOffsetDelegate::setModelData(QWidget* editor, QAbstractItemModel* model, const QModelIndex& index) const {
-	auto* spin = static_cast<QSpinBox*>(editor);
-	spin->interpretText();
-	model->setData(index, spin->value(), Qt::EditRole);
 }

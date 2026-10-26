@@ -108,13 +108,20 @@ int main(int argc, char** argv) {
 	bool saveOk = false;
 	QObject::connect(&manager, &Manager::ConfigSaveFinished, &app, [&](bool ok, const QString&) { saveOk = ok; });
 	ConfigView edited = manager.View();
-	edited.host = "localhost";
+	edited.uvx = "missing-uvx-for-workspace-tests";
 	edited.depotDownloader.executable = fakeDepot;
 	manager.SaveConfig(edited);
 	if (!Check(saveOk, "new config saves")) {
 		return 1;
 	}
 	const QJsonObject saved = QJsonDocument::fromJson(ReadFile(configPath)).object();
+	if (!Check(saved.value("schemaVersion").toInt() == 2 && !saved.contains("scanBasePort") &&
+		!saved.contains("host") && !saved.contains("portOverrides"), "legacy network configuration removed")) {
+		return 1;
+	}
+	if (!Check(QFile::exists(configPath + ".pre-hexrays.bak"), "legacy configuration backed up before migration")) {
+		return 1;
+	}
 	if (!Check(saved.value("workspaces").toArray().size() == 1, "workspaces saved")) {
 		return 1;
 	}
@@ -371,6 +378,125 @@ int main(int argc, char** argv) {
 	manager.SaveConfig(unsupported);
 	if (!Check(!saveOk, "unsupported AppID/OS mapping rejected")) {
 		return 1;
+	}
+
+	for (const QString& os : {QString("windows"), QString("linux")}) {
+		const QString csgoConfigPath = temp.filePath("csgo-" + os + "/config.json");
+		QJsonObject csgoRoot = root;
+		csgoRoot["workspaces"] = QJsonArray{};
+		if (!Check(WriteFile(csgoConfigPath, QJsonDocument(csgoRoot).toJson()), "CS:GO config fixture")) {
+			return 1;
+		}
+		Manager csgoManager;
+		if (!Check(csgoManager.LoadConfig(csgoConfigPath, &error), qPrintable(error))) {
+			return 1;
+		}
+		ConfigView csgoConfig = csgoManager.View();
+		csgoConfig.depotDownloader.executable = fakeDepot;
+		Workspace csgo;
+		csgo.tag = "csgo-" + os;
+		csgo.color = "#EADDFF";
+		csgo.source = temp.filePath(csgo.tag + "/manifests");
+		csgo.output = csgo.source;
+		csgo.files = os == "linux"
+			? QStringList{"csgo/bin/linux64/client_client.so", "csgo/bin/linux64/server_client.so", "bin/linux64/engine_client.so"}
+			: QStringList{"csgo/bin/client.dll", "csgo/bin/server.dll", "bin/engine.dll"};
+		csgo.depot.enabled = true;
+		csgo.depot.appId = 4465480;
+		csgo.depot.os = os;
+		csgoConfig.steamWorkspaces << csgo;
+		bool csgoSaveOk = false;
+		QObject::connect(&csgoManager, &Manager::ConfigSaveFinished, &app, [&](bool ok, const QString&) { csgoSaveOk = ok; });
+		csgoManager.SaveConfig(csgoConfig);
+		if (!Check(csgoSaveOk, "CS:GO Steam workspace saves for both operating systems")) {
+			return 1;
+		}
+		if (!Check(csgoManager.LoadConfig(csgoConfigPath, &error), qPrintable(error))) {
+			return 1;
+		}
+		csgoManager.UpdateDepot({csgo.tag}, "latest", "test-user", "test-password", "12345", true);
+		const QString csgoCurrentRoot = QDir(csgo.output).filePath("2222222222222222222");
+		for (const QString& file : csgo.files) {
+			if (!Check(ReadFile(QDir(csgoCurrentRoot).filePath(file)) == QByteArray("depot:") + file.toUtf8(), "CS:GO binaries installed from the matching depot without a game prefix")) {
+				return 1;
+			}
+		}
+		if (!Check(csgoManager.View().steamWorkspaces.first().depot.manifest == "2222222222222222222", "authenticated CS:GO Latest becomes Current")) {
+			return 1;
+		}
+		const QByteArray csgoSaved = ReadFile(csgoConfigPath);
+		if (!Check(!csgoSaved.contains("test-password") && !csgoSaved.contains("12345"), "Steam credentials are not saved in the CS:GO config")) {
+			return 1;
+		}
+	}
+
+	// Any Steam app works once its depot is named: an explicit DepotID and folder replace the
+	// built-in layouts, no steam.inf is requested, and a login-only depot waits for credentials.
+	{
+		const QString gameConfigPath = temp.filePath("generic/config.json");
+		QJsonObject gameRoot = root;
+		gameRoot["workspaces"] = QJsonArray{};
+		if (!Check(WriteFile(gameConfigPath, QJsonDocument(gameRoot).toJson()), "generic Steam config fixture")) {
+			return 1;
+		}
+		Manager gameManager;
+		if (!Check(gameManager.LoadConfig(gameConfigPath, &error), qPrintable(error))) {
+			return 1;
+		}
+		bool gameSaveOk = true;
+		QObject::connect(&gameManager, &Manager::ConfigSaveFinished, &app, [&](bool ok, const QString&) { gameSaveOk = ok; });
+		ConfigView gameConfig = gameManager.View();
+		gameConfig.depotDownloader.executable = fakeDepot;
+		Workspace game;
+		game.tag = "spacewar";
+		game.color = "#D3E3FD";
+		game.source = temp.filePath("spacewar/manifests");
+		game.output = game.source;
+		game.files = {"bin/game.dll", "bin/tools/editor.exe"};
+		game.depot.enabled = true;
+		game.depot.appId = 480;
+		game.depot.os = QString();
+		gameConfig.steamWorkspaces << game;
+		gameManager.SaveConfig(gameConfig);
+		if (!Check(!gameSaveOk, "an app without a built-in layout needs an explicit DepotID")) {
+			return 1;
+		}
+		gameConfig.steamWorkspaces.first().depot.depotId = 481;
+		gameConfig.steamWorkspaces.first().depot.pathPrefix = "content";
+		gameConfig.steamWorkspaces.first().depot.requiresLogin = true;
+		gameManager.SaveConfig(gameConfig);
+		if (!Check(gameSaveOk, "any AppID saves with an explicit DepotID")) {
+			return 1;
+		}
+		const QJsonObject savedGame = QJsonDocument::fromJson(ReadFile(gameConfigPath)).object().value("steamWorkspaces").toArray().first().toObject();
+		if (!Check(savedGame.value("depotId").toInt() == 481 && savedGame.value("pathPrefix").toString() == "content" &&
+					   savedGame.value("requiresLogin").toBool() && savedGame.value("os").toString().isEmpty(),
+				"explicit depot fields saved")) {
+			return 1;
+		}
+		if (!Check(gameManager.LoadConfig(gameConfigPath, &error), qPrintable(error))) {
+			return 1;
+		}
+		const DepotConfig loadedDepot = gameManager.View().steamWorkspaces.first().depot;
+		if (!Check(loadedDepot.depotId == 481 && loadedDepot.pathPrefix == "content" && loadedDepot.requiresLogin && loadedDepot.os.isEmpty(), "explicit depot fields load")) {
+			return 1;
+		}
+		const QString gameCurrentRoot = QDir(game.output).filePath("2222222222222222222");
+		gameManager.UpdateDepot({game.tag}, "latest", "", "", "", false);
+		if (!Check(!QDir(gameCurrentRoot).exists() && gameManager.View().steamWorkspaces.first().depot.manifest.isEmpty(), "login-only depot is refused without credentials")) {
+			return 1;
+		}
+		gameManager.UpdateDepot({game.tag}, "latest", "test-user", "test-password", "", false);
+		for (const QString& file : game.files) {
+			if (!Check(ReadFile(QDir(gameCurrentRoot).filePath(file)) == QByteArray("depot:content/") + file.toUtf8(), "files installed relative to the explicit depot folder")) {
+				return 1;
+			}
+		}
+		const DepotConfig updatedDepot = gameManager.View().steamWorkspaces.first().depot;
+		if (!Check(updatedDepot.manifest == "2222222222222222222" && updatedDepot.patchVersion.isEmpty() && !QFile::exists(QDir(gameCurrentRoot).filePath("csgo/steam.inf")),
+				"generic Latest becomes Current without game metadata")) {
+			return 1;
+		}
 	}
 
 	Manager fresh;

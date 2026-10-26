@@ -17,7 +17,7 @@
 
 namespace {
 	QString InstanceServerName() {
-		const QByteArray userKey = QCryptographicHash::hash(QDir::homePath().toUtf8(), QCryptographicHash::Sha256).toHex().left(16);
+		const QByteArray userKey = QCryptographicHash::hash(Paths::AppHome().toUtf8(), QCryptographicHash::Sha256).toHex().left(16);
 		return "ida-workbench-" + QString::fromLatin1(userKey);
 	}
 

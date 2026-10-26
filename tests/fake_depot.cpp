@@ -11,19 +11,43 @@ int main(int argc, char** argv) {
 		const int index = args.indexOf(key);
 		return (index >= 0 && index + 1 < args.size()) ? args[index + 1] : QString();
 	};
-	if (getValue("-app") != "730" || getValue("-depot") != "2347771" || getValue("-os") != "windows") {
+	const bool csgo = getValue("-app") == "4465480";
+	// Any other Steam app: an explicit DepotID, files under "content/", any OS, login only.
+	const bool generic = getValue("-app") == "480";
+	const bool linux = getValue("-os") == "linux";
+	const QString expectedDepot = generic ? "481" : csgo ? (linux ? "734" : "732") : "2347771";
+	if (generic) {
+		if (getValue("-depot") != expectedDepot || args.contains("-os") || getValue("-username") != "test-user" || getValue("-password") != "test-password") {
+			return 13;
+		}
+	} else if ((!csgo && getValue("-app") != "730") || getValue("-depot") != expectedDepot ||
+			   (!linux && getValue("-os") != "windows") || (!csgo && linux)) {
 		return 5;
 	}
+	// CS:GO needs account access even for the initial Latest manifest query.
+	if (csgo) {
+		if (getValue("-username") != "test-user" || getValue("-password") != "test-password" ||
+			!args.contains("-no-mobile") || !args.contains("-remember-password")) {
+			return 10;
+		}
+		if (QTextStream(stdin).readLine().trimmed() != "12345") {
+			return 11;
+		}
+	}
+	const QStringList files = generic ? QStringList{"content/bin/game.dll", "content/bin/tools/editor.exe"}
+		: csgo ? (linux ? QStringList{"csgo/bin/linux64/client_client.so", "csgo/bin/linux64/server_client.so", "bin/linux64/engine_client.so"}
+		: QStringList{"csgo/bin/client.dll", "csgo/bin/server.dll", "bin/engine.dll"})
+		: QStringList{"game/csgo/bin/win64/client.dll", "game/bin/win64/engine2.dll", "game/csgo/steam.inf"};
 	if (args.contains("-manifest-only")) {
 		const QString root = getValue("-dir");
 		QDir().mkpath(root);
-		QFile catalog(QDir(root).filePath("manifest_2347771_2222222222222222222.txt"));
+		QFile catalog(QDir(root).filePath(QString("manifest_%1_2222222222222222222.txt").arg(expectedDepot)));
 		if (!catalog.open(QIODevice::WriteOnly | QIODevice::Text)) {
 			return 7;
 		}
-		catalog.write("1 1 hash 0 game\\csgo\\bin\\win64\\client.dll\n"
-			"1 1 hash 0 game\\bin\\win64\\engine2.dll\n"
-			"1 1 hash 0 game\\csgo\\steam.inf\n");
+		for (const QString& relative : files) {
+			catalog.write("1 1 hash 0 " + QDir::toNativeSeparators(relative).toUtf8() + '\n');
+		}
 		QTextStream(stdout) << "Manifest 2222222222222222222\n";
 		return 0;
 	}
@@ -49,6 +73,17 @@ int main(int argc, char** argv) {
 	while (!fileList.atEnd()) {
 		const QString relative = QString::fromUtf8(fileList.readLine()).trimmed();
 		if (relative.isEmpty()) {
+			continue;
+		}
+		if (csgo && !files.contains(relative) && relative != "csgo/steam.inf") {
+			return 12;
+		}
+		// A depot without a known game's build stamp must not be asked for one.
+		if (generic && !files.contains(relative)) {
+			return 14;
+		}
+		// The binary depots do not ship CS:GO's common-content steam.inf.
+		if (csgo && relative == "csgo/steam.inf") {
 			continue;
 		}
 		const QString path = QDir(root).filePath(relative);

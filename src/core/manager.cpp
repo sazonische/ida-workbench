@@ -1,4 +1,5 @@
 #include "manager.h"
+#include "mcp_client.h"
 
 #include "logging.h"
 #include "paths.h"
@@ -8,6 +9,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
 #include <QHash>
@@ -15,40 +17,24 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
-#include <QEventLoop>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QProcess>
-#include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSet>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTextStream>
-#include <QTcpSocket>
-#include <QThread>
 #include <QTimer>
-#include <QStandardPaths>
 #include <algorithm>
-#include <future>
-#include <memory>
-#include <vector>
-
-#ifndef Q_OS_WIN
-	#include <csignal>
-#endif
 
 #ifdef Q_OS_WIN
 	#define NOMINMAX
 	#include <windows.h>
-	#include <iphlpapi.h>
 #endif
-
-// Base for scan-library ports: port = scanBasePort + nameIndex + tag portOffset.
-// Extra libraries use scanBasePort + 1000 + index. Editable via "scanBasePort".
-static const int DEFAULT_BASE_PORT = 8500;
 
 // The whole app shares ONE canonical log file (see logging.h): the in-app panel
 // messages, verbose diagnostics, and the MCP server subprocess output all land in
@@ -56,27 +42,59 @@ static const int DEFAULT_BASE_PORT = 8500;
 static const int DEFAULT_MAX_LOG_MB = 10;
 static const int MAX_LOG_MB_CEILING = 10240;
 
-struct DepotLayout {
-	int depotId = 0;
-	QString pathPrefix;
-};
-
-static DepotLayout DepotLayoutFor(int appId, const QString& os) {
-	if (appId == 730) {
-		if (os.compare("windows", Qt::CaseInsensitive) == 0) {
-			return {2347771, "game"};
-		}
-		if (os.compare("linux", Qt::CaseInsensitive) == 0) {
-			return {2347773, "game"};
-		}
+DepotLayout DepotLayoutFor(int appId, const QString& os) {
+	const bool onWindows = os.compare("windows", Qt::CaseInsensitive) == 0;
+	const bool onLinux = os.compare("linux", Qt::CaseInsensitive) == 0;
+	if (appId == 730 && (onWindows || onLinux)) {
+		return {onWindows ? 2347771 : 2347773, "game", "csgo/steam.inf", "https://raw.githubusercontent.com/SteamDatabase/GameTracking-CS2/master/game/csgo/steam.inf", false};
+	}
+	// Standalone CS:GO needs an account that owns it, even for Latest.
+	if (appId == 4465480 && (onWindows || onLinux)) {
+		return {onWindows ? 732 : 734, {}, "csgo/steam.inf", {}, true};
 	}
 	return {};
+}
+
+DepotLayout DepotLayoutFor(const DepotConfig& depot) {
+	DepotLayout layout = DepotLayoutFor(depot.appId, depot.os);
+	if (depot.depotId > 0) {
+		layout = {depot.depotId, QDir::cleanPath(QDir::fromNativeSeparators(depot.pathPrefix.trimmed())), {}, {}, false};
+		if (layout.pathPrefix == ".") {
+			layout.pathPrefix.clear(); // cleanPath("") is "."
+		}
+	}
+	layout.accountRequired = layout.accountRequired || depot.requiresLogin;
+	return layout;
+}
+
+static QString DatabaseKey(QString path) {
+	if (path.endsWith(".i64", Qt::CaseInsensitive) || path.endsWith(".idb", Qt::CaseInsensitive)) { path.chop(4); }
+	const QFileInfo info(path);
+	path = info.canonicalFilePath().isEmpty() ? info.absoluteFilePath() : info.canonicalFilePath();
+#ifdef Q_OS_WIN
+	return QDir::cleanPath(path).toCaseFolded();
+#else
+	return QDir::cleanPath(path);
+#endif
+}
+
+QString DatabaseInput(const QString& binary) {
+	return QFile::exists(binary + ".i64") ? binary + ".i64" : binary;
+}
+
+// Covers an interactive IDA that has not registered with Nexus yet, and incomplete
+// databases from an interrupted session. Never sweep those files.
+static bool UnpackedDatabaseExists(const QString& binary) {
+	return QFile::exists(binary + ".id0") || QFile::exists(binary + ".id1");
 }
 
 static QString GeneratedTagColor(const QString& tag) {
 	static const char* colors[] = {"#EADDFF", "#FFD8E4", "#D3EFD5", "#D3E3FD", "#FFEFD2", "#CCE8E6", "#F0DBF5", "#E3E9C8"};
 	quint32 hash = 2166136261u;
-	for (const QChar c : tag) { hash ^= c.unicode(); hash *= 16777619u; }
+	for (const QChar c : tag) {
+		hash ^= c.unicode();
+		hash *= 16777619u;
+	}
 	return colors[hash % (sizeof(colors) / sizeof(colors[0]))];
 }
 
@@ -110,8 +128,7 @@ static bool DownloadUrl(const QUrl& url, int timeoutMs, QByteArray* data, QStrin
 	request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
 	// GitHub's API answers 403 to requests without a User-Agent, and naming ourselves is
 	// the polite thing to do for the raw.githubusercontent fetch as well.
-	request.setHeader(QNetworkRequest::UserAgentHeader,
-		QString("ida-workbench/%1").arg(QCoreApplication::applicationVersion()));
+	request.setHeader(QNetworkRequest::UserAgentHeader, QString("ida-workbench/%1").arg(QCoreApplication::applicationVersion()));
 	QNetworkReply* reply = network.get(request);
 	QEventLoop loop;
 	QTimer timer;
@@ -141,7 +158,8 @@ static bool BootstrapDepotDownloader(const QString& configPath, QString* executa
 	const QString binaryName = "DepotDownloader.exe";
 #elif defined(Q_OS_LINUX)
 	const QString asset = QSysInfo::currentCpuArchitecture().contains("arm64") ?
-		"DepotDownloader-linux-arm64.zip" : "DepotDownloader-linux-x64.zip";
+							  "DepotDownloader-linux-arm64.zip" :
+							  "DepotDownloader-linux-x64.zip";
 	const QString binaryName = "DepotDownloader";
 #else
 	if (error) *error = "automatic DepotDownloader installation is supported on Windows and Linux only";
@@ -149,7 +167,10 @@ static bool BootstrapDepotDownloader(const QString& configPath, QString* executa
 #endif
 	const QString tools = QDir(QFileInfo(configPath).absolutePath()).filePath("tools/depotdownloader");
 	const QString binary = QDir(tools).filePath(binaryName);
-	if (QFileInfo(binary).isFile()) { *executable = QFileInfo(binary).absoluteFilePath(); return true; }
+	if (QFileInfo(binary).isFile()) {
+		*executable = QFileInfo(binary).absoluteFilePath();
+		return true;
+	}
 	if (!QDir().mkpath(tools)) {
 		if (error) {
 			*error = QString("cannot create tools directory: %1").arg(tools);
@@ -179,7 +200,7 @@ static bool BootstrapDepotDownloader(const QString& configPath, QString* executa
 #ifdef Q_OS_WIN
 	auto psQuote = [](QString value) { return value.replace("'", "''"); };
 	const QString command = QString("$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath '%1' -DestinationPath '%2' -Force")
-		.arg(psQuote(zipPath), psQuote(tools));
+								.arg(psQuote(zipPath), psQuote(tools));
 	extract.start("powershell.exe", {"-NoProfile", "-NonInteractive", "-Command", command});
 #else
 	extract.start("unzip", {"-o", zipPath, "-d", tools});
@@ -204,8 +225,7 @@ static bool BootstrapDepotDownloader(const QString& configPath, QString* executa
 	}
 	QFile::remove(zipPath);
 #ifndef Q_OS_WIN
-	QFile::setPermissions(binary, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner |
-		QFileDevice::ReadGroup | QFileDevice::ExeGroup | QFileDevice::ReadOther | QFileDevice::ExeOther);
+	QFile::setPermissions(binary, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner | QFileDevice::ReadGroup | QFileDevice::ExeGroup | QFileDevice::ReadOther | QFileDevice::ExeOther);
 #endif
 	if (!QFileInfo(binary).isFile()) {
 		if (error) {
@@ -215,6 +235,32 @@ static bool BootstrapDepotDownloader(const QString& configPath, QString* executa
 	}
 	*executable = QFileInfo(binary).absoluteFilePath();
 	return true;
+}
+
+// IDA 9.4 is the first release with the official MCP server and IDA Nexus.
+static bool SupportedIda(const QString& executable) {
+	if (!QFile::exists(executable)) { return false; }
+#ifdef Q_OS_WIN
+	const std::wstring file = QDir::toNativeSeparators(executable).toStdWString();
+	const DWORD size = GetFileVersionInfoSizeW(file.c_str(), nullptr);
+	if (!size) { return false; }
+	QByteArray data(static_cast<qsizetype>(size), Qt::Uninitialized);
+	if (!GetFileVersionInfoW(file.c_str(), 0, size, data.data())) { return false; }
+	VS_FIXEDFILEINFO* info = nullptr;
+	UINT length = 0;
+	if (!VerQueryValueW(data.data(), L"\\", reinterpret_cast<void**>(&info), &length) || !info) { return false; }
+	const int major = HIWORD(info->dwFileVersionMS);
+	const int minor = LOWORD(info->dwFileVersionMS);
+#else
+	QFile notes(QFileInfo(executable).absolutePath() + "/release-notes.html");
+	if (!notes.open(QIODevice::ReadOnly)) { return false; }
+	const auto version = QRegularExpression("(?:IDA|Version)[^0-9]{0,20}([0-9]+)\\.([0-9]+)", QRegularExpression::CaseInsensitiveOption)
+							 .match(QString::fromUtf8(notes.read(65536)));
+	if (!version.hasMatch()) { return false; }
+	const int major = version.captured(1).toInt();
+	const int minor = version.captured(2).toInt();
+#endif
+	return major > 9 || (major == 9 && minor >= 4);
 }
 
 bool AutoDetectIda(QString* guiPath, QString* textPath) {
@@ -258,7 +304,7 @@ bool AutoDetectIda(QString* guiPath, QString* textPath) {
 	for (int i = candidates.size() - 1; i >= 0; --i) {
 		const QString g = QDir(candidates[i]).filePath(guiName);
 		const QString t = QDir(candidates[i]).filePath(textName);
-		if (QFile::exists(g) && QFile::exists(t)) {
+		if (SupportedIda(g) && QFile::exists(t)) {
 			if (guiPath) {
 				*guiPath = QDir::toNativeSeparators(g);
 			}
@@ -276,9 +322,6 @@ static QString ValidateConfig(const ConfigView& cfg) {
 	// new install has neither. Missing IDA shows as a red readiness chip and
 	// gates the actions; an empty library set is a valid "nothing added yet"
 	// state. Only field formats that would corrupt the file are enforced.
-	if (cfg.host.trimmed().isEmpty()) {
-		return "Host must not be empty.";
-	}
 	if (cfg.logDir.trimmed().isEmpty()) {
 		return "Log directory must not be empty.";
 	}
@@ -288,15 +331,6 @@ static QString ValidateConfig(const ConfigView& cfg) {
 
 	QSet<QString> tags;
 	QSet<QString> instances;
-	QSet<int> ports;
-	auto overrideFor = [&cfg](const QString& tag, const QString& name) -> int {
-		for (const PortOverride& po : cfg.portOverrides) {
-			if (po.tag == tag && po.name == name) {
-				return po.port;
-			}
-		}
-		return 0;
-	};
 	for (const Workspace& workspace : AllWorkspaces(cfg)) {
 		const QString tag = workspace.tag.trimmed();
 		if (tag.isEmpty()) {
@@ -312,8 +346,21 @@ static QString ValidateConfig(const ConfigView& cfg) {
 			return QString("Workspace '%1' has no output.").arg(tag);
 		}
 		if (workspace.depot.enabled) {
-			if (DepotLayoutFor(workspace.depot.appId, workspace.depot.os).depotId <= 0) {
-				return QString("Steam workspace '%1': AppID %2 / OS '%3' is not supported.").arg(tag).arg(workspace.depot.appId).arg(workspace.depot.os);
+			if (workspace.depot.appId <= 0) {
+				return QString("Steam workspace '%1' needs an AppID.").arg(tag);
+			}
+			if (!QStringList{"", "windows", "linux", "macos"}.contains(workspace.depot.os)) {
+				return QString("Steam workspace '%1': OS must be windows, linux, macos or empty (any).").arg(tag);
+			}
+			const DepotLayout layout = DepotLayoutFor(workspace.depot);
+			if (layout.depotId <= 0) {
+				return QString("Steam workspace '%1': enter the DepotID that holds its files (AppID %2 has no built-in depot for OS '%3').")
+					.arg(tag)
+					.arg(workspace.depot.appId)
+					.arg(workspace.depot.os.isEmpty() ? QStringLiteral("any") : workspace.depot.os);
+			}
+			if (QDir::isAbsolutePath(layout.pathPrefix) || layout.pathPrefix == ".." || layout.pathPrefix.startsWith("../")) {
+				return QString("Steam workspace '%1': the depot folder must be relative to the depot root.").arg(tag);
 			}
 			if (QDir::cleanPath(workspace.source) != QDir::cleanPath(workspace.output)) {
 				return QString("Steam workspace '%1' must use one directory for manifests and analysis.").arg(tag);
@@ -330,7 +377,7 @@ static QString ValidateConfig(const ConfigView& cfg) {
 			const QString relative = QDir::cleanPath(raw.trimmed());
 			if (relative.isEmpty() || relative == "." || relative == ".." || QDir::isAbsolutePath(relative) || relative.startsWith("../")) {
 				return QString("File must be relative to %1 (tag %2): %3")
-					.arg(workspace.depot.enabled ? "the depot game directory" : "Source", tag, raw);
+					.arg(workspace.depot.enabled ? "the depot folder" : "Source", tag, raw);
 			}
 			const QString name = QFileInfo(relative).completeBaseName();
 			if (name.isEmpty()) {
@@ -341,15 +388,6 @@ static QString ValidateConfig(const ConfigView& cfg) {
 				return QString("Duplicate library %1 in tag %2.").arg(name, tag);
 			}
 			tagNames.insert(nk);
-			const int ov = overrideFor(tag, name);
-			const int port = ov > 0 ? ov : AutoScanPort(cfg.basePort, fileIndex, workspace.portOffset);
-			if (port < 1 || port > 65535) {
-				return QString("Port for %1@%2 is outside 1..65535.").arg(name, tag);
-			}
-			if (ports.contains(port)) {
-				return QString("Port collision at %1. Change a port on the main page or a tag's offset.").arg(port);
-			}
-			ports.insert(port);
 			instances.insert(tagKey + '\t' + nk);
 		}
 	}
@@ -371,14 +409,6 @@ static QString ValidateConfig(const ConfigView& cfg) {
 			return QString("Duplicate library instance: %1@%2").arg(name, tag);
 		}
 		instances.insert(instance);
-		const int port = extra.port > 0 ? extra.port : AutoExtraPort(cfg.basePort, i);
-		if (port < 1 || port > 65535) {
-			return QString("Port for library %1 is outside 1..65535.").arg(name);
-		}
-		if (ports.contains(port)) {
-			return QString("Port collision at %1 (library %2).").arg(port).arg(name);
-		}
-		ports.insert(port);
 	}
 	return {};
 }
@@ -404,37 +434,6 @@ static QString PrepareWorkspaceDirectories(const ConfigView& cfg) {
 		}
 	}
 	return {};
-}
-
-int FirstFreeExtraPort(const ConfigView& cfg) {
-	QSet<int> used;
-	auto overrideFor = [&cfg](const QString& tag, const QString& name) -> int {
-		for (const PortOverride& po : cfg.portOverrides) {
-			if (po.tag == tag && po.name == name) {
-				return po.port;
-			}
-		}
-		return 0;
-	};
-	for (const Workspace& workspace : AllWorkspaces(cfg)) {
-		for (int fileIndex = 0; fileIndex < workspace.files.size(); ++fileIndex) {
-			const QString& raw = workspace.files[fileIndex];
-			const QString name = QFileInfo(raw.trimmed()).completeBaseName();
-			if (name.isEmpty()) {
-				continue;
-			}
-			const int ov = overrideFor(workspace.tag.trimmed(), name);
-			used.insert(ov > 0 ? ov : AutoScanPort(cfg.basePort, fileIndex, workspace.portOffset));
-		}
-	}
-	for (int i = 0; i < cfg.extraLibs.size(); ++i) {
-		used.insert(cfg.extraLibs[i].port > 0 ? cfg.extraLibs[i].port : AutoExtraPort(cfg.basePort, i));
-	}
-	int port = AutoExtraPort(cfg.basePort, cfg.extraLibs.size());
-	while (used.contains(port) && port < 65535) {
-		++port;
-	}
-	return port;
 }
 
 static bool CopyFileAtomically(const QString& sourcePath, const QString& destinationPath, QString* error) {
@@ -480,7 +479,7 @@ static bool CopyFileAtomically(const QString& sourcePath, const QString& destina
 	return true;
 }
 
-static void ReadSteamVersions(const QString& steamInfPath, QString* patchVersion, QString* serverVersion) {
+void ReadSteamVersions(const QString& steamInfPath, QString* patchVersion, QString* serverVersion) {
 	QFile inf(steamInfPath);
 	if (!inf.open(QIODevice::ReadOnly | QIODevice::Text)) {
 		return;
@@ -502,19 +501,7 @@ static void ReadSteamVersions(const QString& steamInfPath, QString* patchVersion
 // Records which app version last materialised the helper scripts, next to them.
 static const char* const kScriptStampFile = ".scripts-version";
 
-// The static build is a single exe, but the Python glue it drives (start_mcp.py /
-// analyze_ida.py / disable_autostart.py) are sidecar files. They are embedded as
-// resources and re-materialised next to config.json — an always-writable folder —
-// so copying just the exe to another machine still works.
-//
-// The refresh is keyed on the app version, not on file contents: the bundled copies
-// win exactly once per version, and a local edit made afterwards survives every later
-// launch. Comparing contents on every start (the older behaviour) reverted such an
-// edit on the next launch, which left anyone on an already-released build unable to
-// patch a broken helper at all — and the helpers break from the outside, when
-// ida-pro-mcp renames something. A missing file is still restored no matter what the
-// stamp says: that self-heal is what makes a bare copied exe work. Silently no-ops in
-// builds without the resource (e.g. unit tests).
+// The standalone analyzer is embedded so a copied exe can create databases.
 static void EnsureHelperScripts(const QString& destDir) {
 	QDir().mkpath(destDir);
 	const QString version = QCoreApplication::applicationVersion();
@@ -525,38 +512,30 @@ static void EnsureHelperScripts(const QString& destDir) {
 		stampFile.close();
 	}
 	const bool refresh = stamp != version;
-	bool haveResource = false;
-	QStringList written;
-	for (const char* name : {"start_mcp.py", "analyze_ida.py", "disable_autostart.py"}) {
-		const QString dest = QDir(destDir).filePath(name);
-		const bool present = QFile::exists(dest);
-		if (present && !refresh) {
-			continue; // this version already deployed its copy — keep any local edit
-		}
-		QFile bundled(QString(":/scripts/%1").arg(name));
-		if (!bundled.open(QIODevice::ReadOnly)) {
-			continue; // resource absent (tests) — leave any on-disk copy
-		}
-		haveResource = true;
-		const QByteArray data = bundled.readAll();
-		if (present) {
-			QFile existing(dest);
-			if (existing.open(QIODevice::ReadOnly) && existing.readAll() == data) {
-				continue; // identical — not worth a write or a log line
-			}
-		}
+	const QString dest = QDir(destDir).filePath("analyze_ida.py");
+	const bool present = QFile::exists(dest);
+	if (present && !refresh) {
+		return; // this version already deployed its copy — keep any local edit
+	}
+	QFile bundled(":/scripts/analyze_ida.py");
+	if (!bundled.open(QIODevice::ReadOnly)) {
+		return; // resource absent (tests) — leave any on-disk copy
+	}
+	const QByteArray data = bundled.readAll();
+	bool identical = false; // not worth a write or a log line
+	if (present) {
+		QFile existing(dest);
+		identical = existing.open(QIODevice::ReadOnly) && existing.readAll() == data;
+	}
+	if (!identical) {
 		QSaveFile out(dest);
 		if (out.open(QIODevice::WriteOnly) && out.write(data) == data.size() && out.commit()) {
-			written << QString::fromLatin1(name);
+			Log::Write(Log::Level::Info, QString("[scripts] refreshed for %1: analyze_ida.py").arg(version));
 		}
-	}
-	if (!written.isEmpty()) {
-		Log::Write(Log::Level::Info,
-			QString("[scripts] refreshed for %1: %2").arg(version, written.join(", ")));
 	}
 	// Stamp only once the resource proved readable, so a build without it cannot claim
 	// a version it never deployed and suppress the refresh for a build that has it.
-	if (refresh && haveResource) {
+	if (refresh) {
 		QSaveFile out(QDir(destDir).filePath(kScriptStampFile));
 		if (out.open(QIODevice::WriteOnly)) {
 			out.write(version.toUtf8());
@@ -586,6 +565,50 @@ static bool RedirectLogDirOutOfAppHome(QString* logDir) {
 	return true;
 }
 
+// The schema 2 form of workspaces, shared by migration and Save.
+static QJsonArray WorkspacesJson(const QVector<Workspace>& workspaces, bool steam) {
+	QJsonArray result;
+	for (const Workspace& workspace : workspaces) {
+		if (workspace.tag.trimmed().isEmpty()) {
+			continue;
+		}
+		QJsonObject object{{"tag", workspace.tag.trimmed()}};
+		if (steam) {
+			object["dir"] = workspace.output.trimmed();
+		} else {
+			object["source"] = workspace.source.trimmed();
+			object["output"] = workspace.output.trimmed();
+		}
+		QJsonArray files;
+		for (const QString& file : workspace.files) {
+			if (!file.trimmed().isEmpty()) {
+				files.append(QDir::cleanPath(file.trimmed()));
+			}
+		}
+		object["files"] = files;
+		object["color"] = workspace.color.trimmed().isEmpty() ? GeneratedTagColor(workspace.tag.trimmed()) : workspace.color.trimmed();
+		if (steam) {
+			object["appId"] = workspace.depot.appId;
+			object["os"] = workspace.depot.os;
+			// Built-in layouts leave these out, so known-game workspaces keep their old form.
+			if (workspace.depot.depotId > 0) {
+				object["depotId"] = workspace.depot.depotId;
+			}
+			if (!workspace.depot.pathPrefix.trimmed().isEmpty()) {
+				object["pathPrefix"] = QDir::fromNativeSeparators(workspace.depot.pathPrefix.trimmed());
+			}
+			if (workspace.depot.requiresLogin) {
+				object["requiresLogin"] = true;
+			}
+			if (!workspace.depot.manifest.isEmpty()) {
+				object["current"] = workspace.depot.manifest;
+			}
+		}
+		result.append(object);
+	}
+	return result;
+}
+
 Manager::Manager(QObject* parent) :
 	QObject(parent) {
 }
@@ -597,7 +620,7 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 	// Self-heal the sidecar scripts in the (writable) config dir before resolving
 	// where to run them from, so a bare copied exe finds its helpers there.
 	EnsureHelperScripts(configDir);
-	_scriptDir = QFile::exists(QDir(appDir).filePath("start_mcp.py")) ? appDir : configDir;
+	_scriptDir = QFile::exists(QDir(appDir).filePath("analyze_ida.py")) ? appDir : configDir;
 	QFile f(path);
 	if (!f.open(QIODevice::ReadOnly)) {
 		if (err) {
@@ -617,15 +640,14 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 	QJsonObject c = doc.object();
 	ConfigView next;
 	bool generatedColors = false;
-	next.host = c.value("host").toString("127.0.0.1");
+	const QJsonValue uvx = c.value("mcp").toObject().value("executable");
+	next.uvx = ExpandUserPath(uvx.isString() ? uvx.toString() : McpClient::FindUvx());
 	const QJsonObject ida = c.value("ida").toObject();
 	next.idaGui = ExpandUserPath(ida.value("gui").toString());
 	next.idaText = ExpandUserPath(ida.value("text").toString());
 	next.logDir = ExpandUserPath(c.value("logDir").toString(Paths::DefaultLogDirSetting()));
 	const bool logDirMigrated = RedirectLogDirOutOfAppHome(&next.logDir);
 	next.analysisArgs = c.value("analysisArgs").toString().trimmed();
-	const int bp = c.value("scanBasePort").toInt(DEFAULT_BASE_PORT);
-	next.basePort = (bp >= 1024 && bp <= 60000) ? bp : DEFAULT_BASE_PORT;
 	const int ml = c.value("maxLogSizeMB").toInt(DEFAULT_MAX_LOG_MB);
 	next.maxLogMB = (ml >= 0 && ml <= MAX_LOG_MB_CEILING) ? ml : DEFAULT_MAX_LOG_MB;
 	const QJsonObject downloader = c.value("depotDownloader").toObject();
@@ -643,12 +665,17 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 			workspace.source = ExpandUserPath(object.value("source").toString().trimmed());
 			workspace.output = ExpandUserPath(object.value("output").toString().trimmed());
 		}
-		workspace.portOffset = object.value("portOffset").toInt();
 		workspace.color = object.value("color").toString().trimmed().toUpper();
-		if (workspace.color.isEmpty()) { workspace.color = GeneratedTagColor(workspace.tag); generatedColors = true; }
+		if (workspace.color.isEmpty()) {
+			workspace.color = GeneratedTagColor(workspace.tag);
+			generatedColors = true;
+		}
 		workspace.depot.enabled = steam;
 		workspace.depot.appId = object.value("appId").toInt(730);
 		workspace.depot.os = object.value("os").toString("windows").trimmed().toLower();
+		workspace.depot.depotId = object.value("depotId").toInt(0);
+		workspace.depot.pathPrefix = object.value("pathPrefix").toString().trimmed();
+		workspace.depot.requiresLogin = object.value("requiresLogin").toBool(false);
 		workspace.depot.manifest = object.value("current").toString().trimmed();
 		for (const QJsonValue file : object.value("files").toArray()) {
 			const QString relative = QDir::cleanPath(file.toString().trimmed());
@@ -667,23 +694,16 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 	for (const QJsonValue value : c.value("steamWorkspaces").toArray()) {
 		parseWorkspace(value.toObject(), true);
 	}
-	for (const QJsonValue value : c.value("portOverrides").toArray()) {
-		const QJsonObject object = value.toObject();
-		const QString tag = object.value("tag").toString().trimmed();
-		const QString name = object.value("name").toString().trimmed();
-		const int port = object.value("port").toInt();
-		if (!tag.isEmpty() && !name.isEmpty() && port > 0) {
-			next.portOverrides.push_back({tag, name, port});
-		}
-	}
 	for (const QJsonValue value : c.value("extraLibs").toArray()) {
 		const QJsonObject object = value.toObject();
 		ExtraLib extra;
 		extra.tag = object.value("tag").toString().trimmed();
 		extra.path = ExpandUserPath(object.value("path").toString().trimmed());
-		extra.port = object.value("port").toInt();
 		extra.color = object.value("color").toString().trimmed().toUpper();
-		if (extra.color.isEmpty()) { extra.color = GeneratedTagColor(extra.tag); generatedColors = true; }
+		if (extra.color.isEmpty()) {
+			extra.color = GeneratedTagColor(extra.tag);
+			generatedColors = true;
+		}
 		if (!extra.tag.isEmpty() && !extra.path.isEmpty()) {
 			next.extraLibs << extra;
 		}
@@ -708,19 +728,26 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 	for (Workspace& workspace : next.steamWorkspaces) {
 		workspace.depot.patchVersion.clear();
 		workspace.depot.serverVersion.clear();
-		if (!workspace.depot.manifest.isEmpty()) {
-			ReadSteamVersions(QDir(workspace.output).filePath(workspace.depot.manifest + "/csgo/steam.inf"),
-				&workspace.depot.patchVersion, &workspace.depot.serverVersion);
+		const QString versionFile = DepotLayoutFor(workspace.depot).versionFile;
+		if (!workspace.depot.manifest.isEmpty() && !versionFile.isEmpty()) {
+			ReadSteamVersions(QDir(workspace.output).filePath(workspace.depot.manifest + "/" + versionFile), &workspace.depot.patchVersion, &workspace.depot.serverVersion);
 		}
 	}
-	bool schemaNeedsWrite = generatedColors || logDirMigrated || !c.contains("analysisArgs") || !c.contains("depotDownloader") || !c.contains("steamWorkspaces");
-	for (const QJsonValue value : c.value("workspaces").toArray()) {
-		const QJsonObject object = value.toObject();
-		if (!object.contains("color") || !object.contains("portOffset")) {
-			schemaNeedsWrite = true;
-		}
-	}
+	const bool legacy = c.value("schemaVersion").toInt() < 2;
+	if (legacy && (!SupportedIda(next.idaGui) || !QFile::exists(next.idaText))) { AutoDetectIda(&next.idaGui, &next.idaText); }
+	const bool schemaNeedsWrite = legacy || generatedColors || logDirMigrated || !c.contains("analysisArgs") || !c.contains("depotDownloader") || !c.contains("steamWorkspaces");
 	if (schemaNeedsWrite) {
+		const QString backup = _configPath + ".pre-hexrays.bak";
+		if (legacy && !QFile::exists(backup) && !QFile::copy(_configPath, backup)) {
+			if (err) { *err = "Cannot back up the old configuration before migration: " + backup; }
+			return false;
+		}
+		c["schemaVersion"] = 2;
+		c.remove("host");
+		c.remove("scanBasePort");
+		c.remove("portOverrides");
+		c["mcp"] = QJsonObject{{"executable", next.uvx}};
+		c["ida"] = QJsonObject{{"gui", next.idaGui}, {"text", next.idaText}};
 		QHash<QString, QString> extraColors;
 		for (const ExtraLib& extra : next.extraLibs) {
 			extraColors.insert(extra.tag + '\t' + extra.path, extra.color);
@@ -731,35 +758,12 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 		}
 		c["analysisArgs"] = next.analysisArgs;
 		c["depotDownloader"] = QJsonObject{{"executable", next.depotDownloader.executable}, {"timeoutMinutes", next.depotDownloader.timeoutMinutes}};
-		auto workspaceObject = [](const Workspace& workspace, bool steam) {
-			QJsonObject object{{"tag", workspace.tag}, {"files", QJsonArray::fromStringList(workspace.files)},
-				{"portOffset", workspace.portOffset}, {"color", workspace.color}};
-			if (steam) {
-				object["dir"] = workspace.output;
-				object["appId"] = workspace.depot.appId;
-				object["os"] = workspace.depot.os;
-				if (!workspace.depot.manifest.isEmpty()) {
-					object["current"] = workspace.depot.manifest;
-				}
-			} else {
-				object["source"] = workspace.source;
-				object["output"] = workspace.output;
-			}
-			return object;
-		};
-		QJsonArray workspaceArray;
-		for (const Workspace& workspace : next.workspaces) {
-			workspaceArray.append(workspaceObject(workspace, false));
-		}
-		c["workspaces"] = workspaceArray;
-		QJsonArray steamArray;
-		for (const Workspace& workspace : next.steamWorkspaces) {
-			steamArray.append(workspaceObject(workspace, true));
-		}
-		c["steamWorkspaces"] = steamArray;
+		c["workspaces"] = WorkspacesJson(next.workspaces, false);
+		c["steamWorkspaces"] = WorkspacesJson(next.steamWorkspaces, true);
 		QJsonArray extraArray = c.value("extraLibs").toArray();
 		for (int i = 0; i < extraArray.size(); ++i) {
 			QJsonObject object = extraArray[i].toObject();
+			object.remove("port");
 			const QString key = object.value("tag").toString() + '\t' + object.value("path").toString();
 			if (object.value("color").toString().trimmed().isEmpty()) {
 				object["color"] = extraColors.value(key);
@@ -768,35 +772,30 @@ bool Manager::LoadConfig(const QString& path, QString* err) {
 		}
 		c["extraLibs"] = extraArray;
 		QSaveFile normalized(_configPath);
-		if (normalized.open(QIODevice::WriteOnly)) {
-			normalized.write(QJsonDocument(c).toJson(QJsonDocument::Indented));
-			normalized.commit();
+		const QByteArray migrated = QJsonDocument(c).toJson(QJsonDocument::Indented);
+		if (!normalized.open(QIODevice::WriteOnly) || normalized.write(migrated) != migrated.size() || !normalized.commit()) {
+			if (err) { *err = "Cannot save migrated configuration: " + normalized.errorString(); }
+			return false;
 		}
 	}
 
-	_host = next.host.trimmed();
+	_uvx = next.uvx.trimmed();
 	_idaGui = next.idaGui;
 	_idaText = next.idaText;
 	_logDir = next.logDir;
 	_analysisArgs = next.analysisArgs;
 	_maxLogMB = next.maxLogMB;
-	_basePort = next.basePort;
 	_depotDownloader = next.depotDownloader;
 	_workspaces = AllWorkspaces(next);
 	_extraLibs = next.extraLibs;
-	_portOverrides = next.portOverrides;
 	RebuildInstances();
 	// Point the canonical log at the configured folder and apply the size cap.
 	Log::Configure(QDir(_logDir).filePath(Log::FileName()), _maxLogMB);
 	if (logDirMigrated) {
 		// Written after the re-point, so the note lands in the folder it talks about.
-		Log::Write(Log::Level::Info,
-			QString("[config] logs moved out of the app folder into %1").arg(QDir::toNativeSeparators(_logDir)));
+		Log::Write(Log::Level::Info, QString("[config] logs moved out of the app folder into %1").arg(QDir::toNativeSeparators(_logDir)));
 	}
-	qDebug().noquote() << QString("[config] loaded %1 · ida=%2 · idat=%3 · basePort=%4 · workspaces=%5")
-							  .arg(QFileInfo(path).absoluteFilePath(), _idaGui, _idaText)
-							  .arg(_basePort)
-							  .arg(_workspaces.size());
+	qDebug().noquote() << "[config] loaded" << path << "Hex-Rays MCP:" << _uvx;
 	return true;
 }
 
@@ -806,10 +805,10 @@ bool Manager::CreateDefaultConfig(const QString& path, QString* err) {
 	AutoDetectIda(&gui, &text); // best-effort; left blank when IDA is not found
 
 	QJsonObject root;
-	root["host"] = "127.0.0.1";
+	root["schemaVersion"] = 2;
+	root["mcp"] = QJsonObject{{"executable", McpClient::FindUvx()}};
 	root["ida"] = QJsonObject{{"gui", gui}, {"text", text}};
 	root["logDir"] = Paths::DefaultLogDirSetting();
-	root["scanBasePort"] = DEFAULT_BASE_PORT;
 	root["maxLogSizeMB"] = DEFAULT_MAX_LOG_MB;
 	root["analysisArgs"] = "";
 	root["depotDownloader"] = QJsonObject{{"executable", "DepotDownloader.exe"}, {"timeoutMinutes", 30}};
@@ -838,6 +837,62 @@ bool Manager::CreateDefaultConfig(const QString& path, QString* err) {
 		return false;
 	}
 	return true;
+}
+
+// A Steam workspace keeps each ManifestID in its own folder; a folder workspace keeps
+// Current in its output and archived revisions under revisions/<timestamp>.
+static QString RevisionRoot(const Workspace& workspace, const QString& revision) {
+	if (workspace.depot.enabled) {
+		const QString manifest = revision.isEmpty() ? workspace.depot.manifest : revision;
+		return QDir(workspace.output).filePath(manifest.isEmpty() ? ".no-current-manifest" : manifest);
+	}
+	return revision.isEmpty() ? workspace.output : QDir(workspace.output).filePath("revisions/" + revision);
+}
+
+static Instance WorkspaceInstance(const Workspace& workspace, const QString& relative, const QString& revision) {
+	Instance inst;
+	inst.tag = workspace.tag;
+	inst.name = QFileInfo(relative).completeBaseName();
+	inst.relativeFile = relative;
+	inst.outputRoot = workspace.output;
+	inst.storedVersion = revision;
+	inst.binary = QDir(RevisionRoot(workspace, revision)).filePath(relative);
+	inst.hasSource = !workspace.depot.enabled;
+	inst.compareSource = inst.hasSource && revision.isEmpty();
+	if (inst.hasSource) {
+		inst.sourceBinary = QDir(workspace.source).filePath(relative);
+	}
+	return inst;
+}
+
+static Instance ExtraLibInstance(const ExtraLib& extra) {
+	Instance inst;
+	inst.tag = extra.tag;
+	inst.name = QFileInfo(extra.path).completeBaseName();
+	inst.binary = extra.path;
+	return inst;
+}
+
+std::optional<Instance> ResolveInstance(const QVector<Workspace>& workspaces, const QVector<ExtraLib>& extraLibs, const Target& target) {
+	for (const Workspace& workspace : workspaces) {
+		if (workspace.tag != target.tag) {
+			continue;
+		}
+		for (const QString& relative : workspace.files) {
+			if (QFileInfo(relative).completeBaseName() == target.name) {
+				return WorkspaceInstance(workspace, relative, target.revision);
+			}
+		}
+	}
+	if (!target.revision.isEmpty()) {
+		return std::nullopt; // extra libs have no stored revisions
+	}
+	for (const ExtraLib& extra : extraLibs) {
+		if (extra.tag == target.tag && QFileInfo(extra.path).completeBaseName() == target.name) {
+			return ExtraLibInstance(extra);
+		}
+	}
+	return std::nullopt;
 }
 
 void Manager::RebuildInstances() {
@@ -870,54 +925,16 @@ void Manager::RebuildInstances() {
 		}
 	}
 
-	auto overrideFor = [this](const QString& tag, const QString& name) -> int {
-		for (const PortOverride& po : _portOverrides) {
-			if (po.tag == tag && po.name == name) {
-				return po.port;
-			}
-		}
-		return 0;
-	};
 	for (const Workspace& sd : _workspaces) {
 		const QString selectedVersion = _selectedVersions.value(sd.tag);
-		QString root;
-		if (sd.depot.enabled) {
-			const QString manifest = selectedVersion.isEmpty() ? sd.depot.manifest : selectedVersion;
-			root = QDir(sd.output).filePath(manifest.isEmpty() ? ".no-current-manifest" : manifest);
-		} else {
-			root = selectedVersion.isEmpty() ? sd.output : QDir(sd.output).filePath("revisions/" + selectedVersion);
-		}
-		for (int fileIndex = 0; fileIndex < sd.files.size(); ++fileIndex) {
-			const QString& relative = sd.files[fileIndex];
-			const QString name = QFileInfo(relative).completeBaseName();
-			if (name.isEmpty()) {
-				continue;
+		for (const QString& relative : sd.files) {
+			if (!QFileInfo(relative).completeBaseName().isEmpty()) {
+				_instances.push_back(WorkspaceInstance(sd, relative, selectedVersion));
 			}
-			Instance inst;
-			inst.tag = sd.tag;
-			inst.name = name;
-			inst.relativeFile = relative;
-			inst.outputRoot = sd.output;
-			inst.storedVersion = selectedVersion;
-			inst.binary = QDir(root).filePath(relative);
-			inst.hasSource = !sd.depot.enabled;
-			inst.compareSource = !sd.depot.enabled && selectedVersion.isEmpty();
-			if (!sd.depot.enabled) {
-				inst.sourceBinary = QDir(sd.source).filePath(relative);
-			}
-			const int ov = overrideFor(sd.tag, name);	  // hand-edited port, else auto
-			inst.port = ov > 0 ? ov : AutoScanPort(_basePort, fileIndex, sd.portOffset);
-			_instances.push_back(inst);
 		}
 	}
-	for (int ei = 0; ei < _extraLibs.size(); ++ei) {
-		const ExtraLib& e = _extraLibs[ei];
-		Instance inst;
-		inst.tag = e.tag;
-		inst.name = QFileInfo(e.path).completeBaseName();
-		inst.binary = e.path;
-		inst.port = e.port > 0 ? e.port : AutoExtraPort(_basePort, ei);
-		_instances.push_back(inst);
+	for (const ExtraLib& e : _extraLibs) {
+		_instances.push_back(ExtraLibInstance(e));
 	}
 }
 
@@ -929,8 +946,9 @@ QStringList Manager::StoredVersions(const QString& tag) const {
 		if (workspace.depot.enabled) {
 			QStringList manifests = QDir(workspace.output).entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name | QDir::Reversed);
 			manifests.erase(std::remove_if(manifests.begin(), manifests.end(), [&workspace](const QString& name) {
-				return name == workspace.depot.manifest || !QRegularExpression("^[0-9]+$").match(name).hasMatch();
-			}), manifests.end());
+								return name == workspace.depot.manifest || !QRegularExpression("^[0-9]+$").match(name).hasMatch();
+							}),
+							manifests.end());
 			return manifests;
 		}
 		QDir revisionsDir(QDir(workspace.output).filePath("revisions"));
@@ -984,8 +1002,7 @@ void Manager::CheckForUpdate() {
 	auto* network = new QNetworkAccessManager(this);
 	QNetworkRequest request{QUrl(releasesApi)}; // braces: parentheses here declare a function
 	request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-	request.setHeader(QNetworkRequest::UserAgentHeader,
-		QString("ida-workbench/%1").arg(QCoreApplication::applicationVersion()));
+	request.setHeader(QNetworkRequest::UserAgentHeader, QString("ida-workbench/%1").arg(QCoreApplication::applicationVersion()));
 	request.setTransferTimeout(10000);
 	QNetworkReply* reply = network->get(request);
 	_updateCheckInFlight = true;
@@ -998,7 +1015,7 @@ void Manager::CheckForUpdate() {
 		network->deleteLater();
 		if (status != QNetworkReply::NoError || body.isEmpty()) {
 			emit Log(QString("[update] check skipped: %1")
-				.arg(status != QNetworkReply::NoError ? networkError : QStringLiteral("empty response")));
+						 .arg(status != QNetworkReply::NoError ? networkError : QStringLiteral("empty response")));
 			return;
 		}
 		FinishUpdateCheck(body);
@@ -1018,9 +1035,7 @@ void Manager::FinishUpdateCheck(const QByteArray& body) {
 		emit Log(QString("[update] %1 is the newest release — nothing to do").arg(latest));
 		return;
 	}
-	const QString url = release.value("html_url").toString().isEmpty()
-		? QStringLiteral("https://github.com/sazonische/ida-workbench/releases/latest")
-		: release.value("html_url").toString();
+	const QString url = release.value("html_url").toString().isEmpty() ? QStringLiteral("https://github.com/sazonische/ida-workbench/releases/latest") : release.value("html_url").toString();
 	emit Log(QString("[update] %1 is available (running %2)").arg(latest, current));
 	emit UpdateAvailable(latest, url);
 }
@@ -1039,245 +1054,157 @@ QString Manager::TargetKey(const Target& target) const {
 }
 
 std::optional<Instance> Manager::ResolveTarget(const Target& target) const {
-	auto overrideFor = [this](const QString& tag, const QString& name) -> int {
-		for (const PortOverride& po : _portOverrides) {
-			if (po.tag == tag && po.name == name) {
-				return po.port;
-			}
-		}
-		return 0;
-	};
-	for (const Workspace& workspace : _workspaces) {
-		if (workspace.tag != target.tag) {
-			continue;
-		}
-		for (int fileIndex = 0; fileIndex < workspace.files.size(); ++fileIndex) {
-			const QString relative = workspace.files[fileIndex];
-			if (QFileInfo(relative).completeBaseName() != target.name) {
-				continue;
-			}
-			QString root;
-			if (workspace.depot.enabled) {
-				const QString manifest = target.revision.isEmpty() ? workspace.depot.manifest : target.revision;
-				root = QDir(workspace.output).filePath(manifest.isEmpty() ? ".no-current-manifest" : manifest);
-			} else {
-				root = target.revision.isEmpty() ? workspace.output :
-					QDir(workspace.output).filePath("revisions/" + target.revision);
-			}
-			Instance inst;
-			inst.tag = workspace.tag;
-			inst.name = target.name;
-			inst.relativeFile = relative;
-			inst.outputRoot = workspace.output;
-			inst.storedVersion = target.revision;
-			inst.binary = QDir(root).filePath(relative);
-			inst.hasSource = !workspace.depot.enabled;
-			inst.compareSource = !workspace.depot.enabled && target.revision.isEmpty();
-			if (inst.hasSource) {
-				inst.sourceBinary = QDir(workspace.source).filePath(relative);
-			}
-			const int overridePort = overrideFor(workspace.tag, target.name);
-			inst.port = overridePort > 0 ? overridePort : AutoScanPort(_basePort, fileIndex, workspace.portOffset);
-			return inst;
-		}
-	}
-	if (!target.revision.isEmpty()) {
-		return std::nullopt;
-	}
-	for (int index = 0; index < _extraLibs.size(); ++index) {
-		const ExtraLib& extra = _extraLibs[index];
-		if (extra.tag != target.tag || QFileInfo(extra.path).completeBaseName() != target.name) {
-			continue;
-		}
-		Instance inst;
-		inst.tag = extra.tag;
-		inst.name = target.name;
-		inst.binary = extra.path;
-		inst.port = extra.port > 0 ? extra.port : AutoExtraPort(_basePort, index);
-		return inst;
-	}
-	return std::nullopt;
+	return ResolveInstance(_workspaces, _extraLibs, target);
 }
 
 bool Manager::TargetBusy(const Target& target) const {
-	if (_depotTags.contains(target.tag)) {
-		return true;
-	}
-	const QString key = TargetKey(target);
-	if (_analyzeJobs.contains(key) || _idaPids.contains(key)) {
+	if (_depotTags.contains(target.tag) || _analyzeJobs.contains(TargetKey(target))) {
 		return true;
 	}
 	const auto requested = ResolveTarget(target);
 	if (!requested) {
 		return false;
 	}
-	const QString path = QDir::cleanPath(QFileInfo(requested->binary).absoluteFilePath()).toLower();
-	for (auto it = _analyzeJobs.constBegin(); it != _analyzeJobs.constEnd(); ++it) {
-		const QStringList parts = it.key().split('\t');
-		const auto activeTarget = ResolveTarget({parts.value(0), parts.value(1), parts.value(2)});
-		if (activeTarget && QDir::cleanPath(QFileInfo(activeTarget->binary).absoluteFilePath()).toLower() == path) {
-			return true;
-		}
-	}
-	for (auto it = _idaPids.constBegin(); it != _idaPids.constEnd(); ++it) {
-		const QStringList parts = it.key().split('\t');
-		const auto openTarget = ResolveTarget({parts.value(0), parts.value(1), parts.value(2)});
-		if (openTarget && QDir::cleanPath(QFileInfo(openTarget->binary).absoluteFilePath()).toLower() == path) {
-			return true;
-		}
-	}
-	return false;
+	const QString path = DatabaseKey(requested->binary);
+	return AnalyzingDatabase(path) || _opening.contains(path) || DatabaseOpen(path) || UnpackedDatabaseExists(requested->binary);
 }
 
-QString Manager::StartPy() const { return QDir(_scriptDir).filePath("start_mcp.py"); }
+bool Manager::DatabaseOpen(const QString& key) const {
+	return _databases.contains(key) || _leases.contains(key);
+}
+
 QString Manager::AnalyzePy() const { return QDir(_scriptDir).filePath("analyze_ida.py"); }
-
-// --- os helpers -------------------------------------------------------------
-
-bool Manager::PortUp(int port, int timeoutMs) const {
-	QTcpSocket s;
-	s.connectToHost(_host, static_cast<quint16>(port));
-	const bool ok = s.waitForConnected(timeoutMs);
-	s.abort();
-	return ok;
-}
-
-qint64 Manager::PidOnPort(int port) const {
-#ifdef Q_OS_WIN
-	DWORD bytes = 0;
-	GetExtendedTcpTable(nullptr, &bytes, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0);
-	QByteArray storage(static_cast<int>(bytes), Qt::Uninitialized);
-	if (GetExtendedTcpTable(storage.data(), &bytes, FALSE, AF_INET, TCP_TABLE_OWNER_PID_LISTENER, 0) == NO_ERROR) {
-		const auto* table = reinterpret_cast<const MIB_TCPTABLE_OWNER_PID*>(storage.constData());
-		for (DWORD index = 0; index < table->dwNumEntries; ++index) {
-			const quint16 networkPort = static_cast<quint16>(table->table[index].dwLocalPort);
-			const int hostPort = ((networkPort & 0xff) << 8) | (networkPort >> 8);
-			if (hostPort == port) {
-				return static_cast<qint64>(table->table[index].dwOwningPid);
-			}
-		}
-	}
-#else
-	QProcess p;
-	p.start("ss", {"-ltnpH"});
-	p.waitForFinished(4000);
-	const QString out = QString::fromLocal8Bit(p.readAllStandardOutput());
-	for (const QString& line : out.split('\n'))
-		if (line.contains(QRegularExpression(QString("[:.]%1\\s").arg(port)))) {
-			const auto m = QRegularExpression("pid=(\\d+)").match(line);
-			if (m.hasMatch()) return m.captured(1).toLongLong();
-		}
-#endif
-	return -1;
-}
-
-bool Manager::IsExpectedServerProcess(qint64 pid) const {
-	if (pid <= 0) {
-		return false;
-	}
-	const QString expected = QFileInfo(_idaGui).fileName();
-#ifdef Q_OS_WIN
-	HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
-	if (!process) {
-		return false;
-	}
-	wchar_t path[32768] = {};
-	DWORD length = static_cast<DWORD>(sizeof(path) / sizeof(path[0]));
-	const bool queried = QueryFullProcessImageNameW(process, 0, path, &length);
-	CloseHandle(process);
-	return queried && QFileInfo(QString::fromWCharArray(path, static_cast<int>(length))).fileName()
-		.compare(expected, Qt::CaseInsensitive) == 0;
-#else
-	const QString executable = QFileInfo(QFileInfo(QString("/proc/%1/exe").arg(pid)).symLinkTarget()).fileName();
-	return !executable.isEmpty() && executable == expected;
-#endif
-}
-
-bool Manager::KillPid(qint64 pid) const {
-	if (pid <= 0) {
-		return false;
-	}
-#ifdef Q_OS_WIN
-	HANDLE process = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, static_cast<DWORD>(pid));
-	if (!process) {
-		return false;
-	}
-	const bool killed = TerminateProcess(process, 1) != FALSE;
-	if (killed) {
-		WaitForSingleObject(process, 3000);
-	}
-	CloseHandle(process);
-	return killed;
-#else
-	return ::kill(static_cast<pid_t>(pid), SIGTERM) == 0;
-#endif
-}
-
-static bool ProcessRunning(qint64 pid) {
-	if (pid <= 0) {
-		return false;
-	}
-#ifdef Q_OS_WIN
-	HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
-	if (!process) {
-		return false;
-	}
-	DWORD code = 0;
-	const bool running = GetExitCodeProcess(process, &code) && code == STILL_ACTIVE;
-	CloseHandle(process);
-	return running;
-#else
-	return ::kill(static_cast<pid_t>(pid), 0) == 0;
-#endif
-}
-
-void Manager::PollIdaProcesses() {
-	for (auto it = _idaPids.begin(); it != _idaPids.end();) {
-		if (ProcessRunning(it.value())) { ++it; continue; }
-		const QStringList parts = it.key().split('\t');
-		Target target{parts.value(0), parts.value(1), parts.value(2)};
-		it = _idaPids.erase(it);
-		emit OperationChanged(target, "ida", false);
-	}
-}
 
 void Manager::RequestStopDepot() {
 	_stopDepotRequested = true;
 }
 
-bool Manager::LaunchServer(const Instance& inst) {
-	if (!QDir().mkpath(_logDir)) {
-		return false;
+void Manager::EnsureMcp() {
+	if (!_mcp) {
+		_mcp = new McpClient(this);
+		connect(_mcp, &McpClient::Log, this, &Manager::Log);
+		connect(_mcp, &McpClient::Disconnected, this, [this] {
+			++_databaseEpoch;
+			_databases.clear();
+			_leases.clear();
+			if (!_shuttingDown) { PublishStatus(); }
+		});
 	}
-	// The server subprocess appends to the SAME canonical file as the GUI, so its
-	// output joins the app log instead of a separate servers.log.
-	const QString logPath = QDir(_logDir).filePath(Log::FileName());
-	QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
-	env.insert("IDA_MCP_PORT", QString::number(inst.port));
-	env.insert("IDA_MCP_HOST", _host);
-	env.insert("IDA_MCP_LOG", logPath);
-	env.insert("IDA_MCP_LOG_MAX_MB", QString::number(_maxLogMB));
+	_mcp->Configure(_uvx, QFileInfo(_idaGui).absolutePath());
+}
 
-	const QString db = inst.binary + ".i64";
-	QProcess proc;
-	proc.setProcessEnvironment(env);
-#ifdef Q_OS_WIN
-	proc.setProgram("cmd.exe");
-	proc.setNativeArguments(QString(R"(/c start "" /min "%1" -A "-S%2" "%3")")
-								.arg(_idaGui, StartPy(), db));
-	qDebug().noquote() << QString("[mcp] launch %1@%2 port=%3 : %4 -A -S%5 %6")
-							  .arg(inst.name, inst.tag)
-							  .arg(inst.port)
-							  .arg(QDir::toNativeSeparators(_idaGui), QDir::toNativeSeparators(StartPy()), QDir::toNativeSeparators(db));
-#else
-	proc.setProgram(_idaGui);
-	proc.setArguments({"-A", "-S" + StartPy(), db});
-	qDebug().noquote() << QString("[mcp] launch %1@%2 port=%3 : %4 -A -S%5 %6")
-							  .arg(inst.name, inst.tag)
-							  .arg(inst.port)
-							  .arg(_idaGui, StartPy(), db);
-#endif
-	return proc.startDetached();
+void Manager::PollDatabases() {
+	if (_listing || _shuttingDown || (!_mcp && !ComputeReadiness().Ready())) { return; }
+	EnsureMcp();
+	_listing = true;
+	const quint64 epoch = _databaseEpoch;
+	_mcp->Call("list_databases", {}, [this, epoch](const QJsonObject& result, const QString& error) {
+		_listing = false;
+		if (_shuttingDown) { return; }
+		if (!error.isEmpty()) { emit Log("[mcp] Cannot list databases: " + error); return; }
+		// A listing begun before an open/release cannot revoke the lease that just
+		// completed. Ask again rather than publishing a stale registry snapshot.
+		if (epoch != _databaseEpoch) { PollDatabases(); return; }
+		QHash<QString, QJsonObject> databases;
+		for (const auto value : result.value("instances").toArray()) {
+			const QJsonObject instance = value.toObject();
+			const QString path = instance.value("path").toString();
+			if (!path.isEmpty() && instance.value("status").toString() != "unavailable") {
+				databases.insert(DatabaseKey(path), instance);
+			}
+		}
+		_databases = databases;
+		for (auto it = _leases.begin(); it != _leases.end();) {
+			if (!_databases.contains(it.key()) && !_opening.contains(it.key())) { it = _leases.erase(it); }
+			else { ++it; }
+		}
+		PublishStatus(); }, 65000);
+}
+
+void Manager::OpenDatabase(const Target& target, bool gui) {
+	const auto instance = ResolveTarget(target);
+	if (!instance) {
+		emit Log("[skip] Library is no longer configured: " + target.name);
+		return;
+	}
+	const QString path = DatabaseKey(instance->binary);
+	const QString label = instance->name + "@" + instance->tag;
+	if (AnalyzingDatabase(path)) {
+		emit Log("[skip] " + label + ": this file is being analyzed");
+		return;
+	}
+	if (_opening.contains(path) || _depotTags.contains(target.tag)) {
+		emit Log("[skip] " + label + ": another operation is in progress");
+		return;
+	}
+	const QString input = DatabaseInput(instance->binary);
+	if (!QFile::exists(input)) {
+		emit Log("[skip] " + label + ": no local binary or database; Replace or download it first");
+		return;
+	}
+	if (gui && _databases.contains(path) && _databases.value(path).value("backend").toString() != "gui") {
+		emit Log("[skip] " + label + ": release the headless database in all clients before opening it in the GUI");
+		return;
+	}
+	if (_leases.contains(path)) {
+		emit Log("[skip] " + label + ": already attached in Workbench");
+		return;
+	}
+	EnsureMcp();
+	++_databaseEpoch;
+	_opening.insert(path);
+	emit OperationChanged(target, "opening", true);
+	emit Log("[open] " + label + (gui ? " in IDA GUI" : " through Hex-Rays MCP"));
+	PublishStatus();
+	_mcp->Call("open_database", {{"path", input}, {"set_current", false}, {"gui", gui}}, [this, path, label, target](const QJsonObject& result, const QString& error) {
+			_opening.remove(path);
+			if (_shuttingDown) { return; }
+			emit OperationChanged(target, "opening", false);
+			const QString id = result.value("instance_id").toString();
+			++_databaseEpoch;
+			if (!error.isEmpty() || id.isEmpty()) {
+				_releaseRequested.remove(path);
+				emit Log("[fail] " + label + ": " + (error.isEmpty() ? "MCP returned no database identifier" : error));
+			} else {
+				_leases.insert(path, id);
+				QJsonObject record = result;
+				record["status"] = "attached";
+				_databases.insert(path, record);
+				emit Log("[open] " + label + " attached · " + id);
+				if (_releaseRequested.remove(path)) { ReleaseDatabase(path); }
+			}
+			Refresh(); }, 300000);
+}
+
+void Manager::ReleaseDatabase(const QString& path) {
+	if (!_leases.contains(path) || !_mcp) {
+		emit Log("[release] No Workbench lease for " + path + "; other clients and GUI windows stay open");
+		return;
+	}
+	if (_opening.contains(path)) { return; }
+	_opening.insert(path);
+	++_databaseEpoch;
+	const QString id = _leases.value(path);
+	PublishStatus();
+	_mcp->Call("save_database", {{"instance_id", id}}, [this, path, id](const QJsonObject&, const QString& error) {
+		if (_shuttingDown) { return; }
+		if (!error.isEmpty()) {
+			_opening.remove(path);
+			emit Log("[fail] Save before release failed: " + error + ". The Workbench lease was kept.");
+			Refresh();
+			return;
+		}
+		_mcp->Call("close_database", {{"instance_id", id}}, [this, path](const QJsonObject& result, const QString& closeError) {
+			++_databaseEpoch;
+			_opening.remove(path);
+			if (_shuttingDown) { return; }
+			if (closeError.isEmpty()) {
+				_leases.remove(path);
+				if (result.value("final_lease").toBool()) { _databases.remove(path); }
+				emit Log("[release] Workbench detached from " + path + "; GUI and other clients retain their databases");
+			} else { emit Log("[fail] Cannot release database: " + closeError); }
+			Refresh(); }, 65000);
+	});
 }
 
 QString Manager::Sha256(const QString& path) {
@@ -1309,47 +1236,7 @@ QString Manager::Sha256(const QString& path) {
 // --- commands ---------------------------------------------------------------
 
 void Manager::OpenIda(const Target& target) {
-	PollIdaProcesses();
-	const auto resolved = ResolveTarget(target);
-	if (!resolved) {
-		emit Log(QString("[fail] %1@%2: library is no longer configured").arg(target.name, target.tag));
-		return;
-	}
-	const Instance* inst = &*resolved;
-	const QString label = QString("%1@%2").arg(inst->name, inst->tag);
-	if (TargetBusy(target)) {
-		emit Log(QString("[skip] %1: this database is already in use").arg(label));
-		return;
-	}
-	if (!QFile::exists(_idaGui)) {
-		emit Log(QString("[fail] %1: IDA GUI executable is missing; check Settings").arg(label));
-		return;
-	}
-	if (PortUp(inst->port)) {
-		emit Log(QString("[skip] %1: MCP server is using this database; stop it before opening IDA").arg(label));
-		return;
-	}
-
-	const QString database = inst->binary + ".i64";
-	const bool hasDatabase = QFile::exists(database);
-	const QString input = hasDatabase ? database : inst->binary;
-	if (!QFile::exists(input)) {
-		emit Log(QString("[fail] %1: neither an IDA database nor the binary exists").arg(label));
-		return;
-	}
-
-	qint64 pid = 0;
-	const bool started = QProcess::startDetached(_idaGui, {input}, QFileInfo(input).absolutePath(), &pid);
-	if (started) {
-		_idaPids.insert(TargetKey(target), pid);
-		emit OperationChanged(target, "ida", true);
-		emit Log(QString("[ida] %1: %2 %3 (pid %4)")
-			.arg(label, hasDatabase ? QStringLiteral("opened database") : QStringLiteral("importing binary"),
-				 QDir::toNativeSeparators(input))
-			.arg(pid));
-	} else {
-		emit Log(QString("[fail] %1: could not launch %2").arg(label, QDir::toNativeSeparators(_idaGui)));
-	}
+	OpenDatabase(target, true);
 }
 
 // Derive a "major.minor" Python version from a linked DLL path, e.g.
@@ -1368,10 +1255,10 @@ static QString PythonVersionFromPath(const QString& path) {
 Readiness Manager::ComputeReadiness() const {
 	Readiness r;
 
-	const bool gui = QFile::exists(_idaGui);
+	const bool gui = SupportedIda(_idaGui);
 	const bool txt = QFile::exists(_idaText);
 	r.ida = gui && txt;
-	r.idaMsg = r.ida ? ("IDA: " + _idaGui) : ("Not found: " + (gui ? _idaText : _idaGui) + " — set IDA paths in Settings");
+	r.idaMsg = r.ida ? ("IDA: " + _idaGui) : ("Not found: " + (gui ? _idaText : _idaGui) + " — select IDA 9.4 or newer in Settings");
 
 	const QString idaDir = QFileInfo(_idaGui).absolutePath();
 	QString pyPlugin;
@@ -1414,21 +1301,25 @@ Readiness Manager::ComputeReadiness() const {
 
 	QString pluginsDir;
 #ifdef Q_OS_WIN
-	pluginsDir = QDir(qEnvironmentVariable("APPDATA")).filePath("Hex-Rays/IDA Pro/plugins");
+	pluginsDir = QDir(qEnvironmentVariable("IDAUSR", QDir(qEnvironmentVariable("APPDATA")).filePath("Hex-Rays/IDA Pro"))).filePath("plugins");
 #else
 	pluginsDir = QDir::homePath() + "/.idapro/plugins";
 #endif
-	const QString mcpPlugin = QDir(pluginsDir).filePath("ida_mcp.py");
-	const bool pluginExists = QFile::exists(mcpPlugin);
-	const bool scriptsExist = QFile::exists(StartPy()) && QFile::exists(AnalyzePy());
-	r.mcp = pluginExists && scriptsExist;
-	if (!pluginExists) {
-		r.mcpMsg = "ida-pro-mcp plugin missing in " + pluginsDir + " — run: ida-pro-mcp --install";
-	} else if (!scriptsExist) {
-		r.mcpMsg = "Workbench helper scripts (start_mcp.py / analyze_ida.py) could not be written to the config folder — check it is writable";
-	} else {
-		r.mcpMsg = "ida-pro-mcp: " + mcpPlugin;
+	const QString mcpPlugin = QDir(pluginsDir).filePath("ida-mcp/ida-plugin.json");
+	const QString executable = ResolveExecutable(_uvx);
+	r.mcp = QFile::exists(mcpPlugin) && !executable.isEmpty();
+	QStringList mcpSetup;
+	if (executable.isEmpty()) {
+		mcpSetup << QString("uvx was not found. It is included with uv. Install it in PowerShell:\n%1\n"
+							"Then restart Workbench, or select uvx.exe in Settings > Official Hex-Rays MCP and save.")
+						.arg(McpClient::UV_INSTALL_COMMAND);
 	}
+	if (!QFile::exists(mcpPlugin)) {
+		mcpSetup << QString("Install the official IDA MCP plugin after uvx is available:\n%1\n"
+							"Restart IDA after installing the plugin.")
+						.arg(McpClient::PLUGIN_INSTALL_COMMAND);
+	}
+	r.mcpMsg = mcpSetup.isEmpty() ? ("Official Hex-Rays MCP · " + executable) : mcpSetup.join("\n\n");
 	return r;
 }
 
@@ -1439,7 +1330,7 @@ static QString FormatMegabytes(qint64 n) {
 // One-line meaning for each status, used in the hover tooltip.
 static QString ExplainStatus(const QString& s) {
 	if (s == "Ready") {
-		return "Analyzed and current — ready to Start.";
+		return "Analyzed and current — ready to open.";
 	}
 	if (s == "Update available") {
 		return "The live game shipped a newer binary — Replace, then Analyze.";
@@ -1462,7 +1353,7 @@ static QString BuildStatusTip(const Instance& inst, const Cell& c, bool binEx, b
 	lines << "Status: " + c.state + " — " + ExplainStatus(c.state);
 	lines << "Binary: " + inst.binary + (binEx ? "  (" + FormatMegabytes(c.size) + ")" : "  (missing)");
 	lines << "Database: " + (c.hasDb ? QString(".i64 present") + (i64stale ? " — older than binary" : "") : QString("none"));
-	lines << "Port: " + QString::number(inst.port);
+	if (c.up) { lines << "IDA Nexus: " + c.backend + " · " + c.instanceId; }
 	if (inst.hasSource) {
 		const QString src = liveEx ? inst.sourceBinary + "  (" + FormatMegabytes(c.srcSize) + ")" : QString("not found");
 		lines << "Source: " + src;
@@ -1471,33 +1362,12 @@ static QString BuildStatusTip(const Instance& inst, const Cell& c, bool binEx, b
 }
 
 void Manager::Refresh() {
-	PollIdaProcesses();
 	emit ReadinessChanged(ComputeReadiness());
-	QVector<int> ports;
-	ports.reserve(_instances.size());
-	for (const Instance& instance : _instances) {
-		if (!ports.contains(instance.port)) {
-			ports << instance.port;
-		}
-	}
-	const QString host = _host;
-	std::vector<std::future<QPair<int, bool>>> portFutures;
-	portFutures.reserve(static_cast<size_t>(ports.size()));
-	for (const int port : ports) {
-		portFutures.emplace_back(std::async(std::launch::async, [host, port] {
-			QTcpSocket socket;
-			socket.connectToHost(host, static_cast<quint16>(port));
-			const bool up = socket.waitForConnected(500);
-			socket.abort();
-			return qMakePair(port, up);
-		}));
-	}
-	QHash<int, bool> portStates;
-	for (auto& future : portFutures) {
-		const auto result = future.get();
-		portStates.insert(result.first, result.second);
-	}
+	PollDatabases();
+	PublishStatus();
+}
 
+void Manager::PublishStatus() {
 	QVector<LibRow> rows;
 	for (const QString& name : _names) {
 		LibRow r;
@@ -1508,8 +1378,12 @@ void Manager::Refresh() {
 			if (inst) {
 				c.present = true;
 				c.sourceConfigured = inst->hasSource;
-				c.port = inst->port;
-				c.up = portStates.value(inst->port, false);
+				const QString path = DatabaseKey(inst->binary);
+				c.up = DatabaseOpen(path);
+				c.owned = _leases.contains(path);
+				c.opening = _opening.contains(path);
+				c.backend = _databases.value(path).value("backend").toString();
+				c.instanceId = _leases.value(path, _databases.value(path).value("instance_id").toString());
 				const QString bin = inst->binary;
 				const QString db = bin + ".i64";
 				const bool binEx = QFile::exists(bin);
@@ -1550,34 +1424,7 @@ void Manager::Refresh() {
 }
 
 void Manager::Start(const QVector<Target>& targets) {
-	PollIdaProcesses();
-	for (const Target& t : targets) {
-		const auto resolved = ResolveTarget(t);
-		if (!resolved) {
-			continue;
-		}
-		const Instance* inst = &*resolved;
-		const QString tag = QString("%1@%2").arg(inst->name, inst->tag);
-		if (TargetBusy(t)) {
-			emit Log(QString("[skip] %1: database is in use by another operation").arg(tag));
-			continue;
-		}
-		if (PortUp(inst->port)) {
-			emit Log(QString("[skip] %1 already up on %2").arg(tag).arg(inst->port));
-			continue;
-		}
-		if (!QFile::exists(inst->binary + ".i64")) {
-			emit Log(QString("[warn] %1: no DB — Analyze first").arg(tag));
-			continue;
-		}
-		if (!LaunchServer(*inst)) {
-			emit Log(QString("[fail] %1: could not launch IDA").arg(tag));
-			continue;
-		}
-		emit Log(QString("[start] %1 -> %2").arg(tag).arg(inst->port));
-	}
-	emit Log("start: done (heavy DBs bind after ~1 min).");
-	Refresh();
+	for (const Target& target : targets) { OpenDatabase(target, false); }
 }
 
 // The database files IDA writes/opens. .i64/.idb is the packed database; the rest are
@@ -1587,168 +1434,19 @@ void Manager::Start(const QVector<Target>& targets) {
 static const QStringList kUnpackedDbExts = {".id0", ".id1", ".id2", ".nam", ".til"};
 static const QStringList kDbExts = QStringList{".i64", ".idb"} + kUnpackedDbExts;
 
-// How long one Stop batch waits for IDA to close its databases on its own before
-// force-killing: long enough for a normal pack, short enough that a wedged IDA does
-// not make Stop feel broken. The window is shared by the whole batch, so stopping
-// eleven servers is no slower than stopping one.
-static const int kStopGraceMs = 8000;
-
-#ifdef Q_OS_WIN
-namespace {
-	struct CloseRequest {
-		DWORD pid = 0;
-		int posted = 0;
-	};
-
-	BOOL CALLBACK PostCloseToWindow(HWND window, LPARAM parameter) {
-		auto* request = reinterpret_cast<CloseRequest*>(parameter);
-		DWORD owner = 0;
-		GetWindowThreadProcessId(window, &owner);
-		// Only real windows (IDA is launched minimized, which still counts as visible):
-		// hidden top-level windows are internal helpers that should not be poked, and
-		// finding none simply falls back to the kill.
-		if (owner != request->pid || !IsWindowVisible(window)) {
-			return TRUE;
-		}
-		if (PostMessageW(window, WM_CLOSE, 0, 0)) {
-			++request->posted;
-		}
-		return TRUE;
-	}
-} // namespace
-#endif
-
-// Ask a process to close itself instead of killing it, so IDA gets to save and pack
-// its database. Returns false when nothing could be asked (no window of ours, signal
-// refused) and the caller should go straight to the kill.
-static bool RequestProcessClose(qint64 pid) {
-	if (pid <= 0) {
-		return false;
-	}
-#ifdef Q_OS_WIN
-	CloseRequest request{static_cast<DWORD>(pid), 0};
-	EnumWindows(&PostCloseToWindow, reinterpret_cast<LPARAM>(&request));
-	return request.posted > 0;
-#else
-	return ::kill(static_cast<pid_t>(pid), SIGTERM) == 0;
-#endif
-}
-
-// Sweep the unpacked database left next to `bin`, returning the bytes freed and the
-// extensions removed. Refuses when there is no packed database to fall back on: those
-// files are then the only copy of the work (an aborted import), and IDA can still pack
-// them itself on the next open.
-static qint64 RemoveUnpackedDatabase(const QString& bin, QStringList* removed, bool* keptUnpacked) {
-	bool present = false;
-	for (const QString& extension : kUnpackedDbExts) {
-		if (QFile::exists(bin + extension)) { present = true; break; }
-	}
-	if (!present) {
-		return 0;
-	}
-	if (!QFile::exists(bin + ".i64") && !QFile::exists(bin + ".idb")) {
-		if (keptUnpacked) {
-			*keptUnpacked = true;
-		}
-		return 0;
-	}
-	qint64 freed = 0;
-	for (const QString& extension : kUnpackedDbExts) {
-		const QString part = bin + extension;
-		if (!QFile::exists(part)) {
-			continue;
-		}
-		const qint64 size = QFileInfo(part).size();
-		if (QFile::remove(part)) {
-			freed += size;
-			if (removed) {
-				*removed << extension;
-			}
-		}
-	}
-	return freed;
-}
-
 void Manager::Stop(const QVector<Target>& targets) {
-	struct Stopping {
-		QString label, binary;
-		int port = 0;
-		qint64 pid = 0;
-		bool asked = false; // a close request was delivered, so its exit is worth waiting for
-	};
-	QVector<Stopping> stopping;
-	for (const Target& t : targets) {
-		const auto resolved = ResolveTarget(t);
-		if (!resolved) {
-			continue;
-		}
-		const Instance* inst = &*resolved;
-		const qint64 pid = PidOnPort(inst->port);
-		if (pid <= 0) {
-			continue;
-		}
-		if (!IsExpectedServerProcess(pid)) {
-			emit Log(QString("[refused] port %1 belongs to an unexpected process (pid %2); not killed")
-						 .arg(inst->port)
-						 .arg(pid));
-			continue;
-		}
-		stopping.push_back({QString("%1@%2").arg(inst->name, inst->tag), inst->binary, inst->port, pid, false});
-	}
-	// Ask everything to close first, then wait once. A clean IDA exit packs the database
-	// back into the .i64 (keeping whatever the MCP session changed) and removes the
-	// unpacked pieces; a kill leaves both the work and those files behind.
-	for (Stopping& target : stopping) {
-		target.asked = RequestProcessClose(target.pid);
-	}
-	if (std::any_of(stopping.cbegin(), stopping.cend(), [](const Stopping& s) { return s.asked; })) {
-		QElapsedTimer grace;
-		grace.start();
-		while (grace.elapsed() < kStopGraceMs) {
-			bool anyAlive = false;
-			for (const Stopping& target : stopping) {
-				if (target.asked && ProcessRunning(target.pid)) { anyAlive = true; break; }
-			}
-			if (!anyAlive) {
-				break;
-			}
-			QThread::msleep(100);
-		}
-	}
-	int n = 0;
-	for (const Stopping& target : stopping) {
-		if (!ProcessRunning(target.pid)) {
-			emit Log(QString("stopped %1 (port %2, pid %3) — IDA closed its database itself")
-						 .arg(target.label)
-						 .arg(target.port)
-						 .arg(target.pid));
-			++n;
-		} else if (!IsExpectedServerProcess(target.pid)) {
-			// The grace window widens the gap between looking the pid up and killing it,
-			// so confirm once more that it is still our IDA and not a recycled pid.
-			emit Log(QString("[refused] %1: pid %2 is no longer our IDA process; not killed").arg(target.label).arg(target.pid));
-			continue;
-		} else if (KillPid(target.pid)) {
-			emit Log(QString("stopped %1 (port %2, pid %3)").arg(target.label).arg(target.port).arg(target.pid));
-			++n;
+	for (const Target& target : targets) {
+		const auto instance = ResolveTarget(target);
+		if (!instance) { continue; }
+		const QString path = DatabaseKey(instance->binary);
+		// A pending operation without a lease is an open; one with a lease is already releasing.
+		if (_opening.contains(path) && !_leases.contains(path)) {
+			_releaseRequested.insert(path);
+			emit Log("[release] Waiting for the pending open, then releasing " + instance->name);
 		} else {
-			emit Log(QString("[fail] could not stop %1 (pid %2)").arg(target.label).arg(target.pid));
-			continue;
-		}
-		QStringList removed;
-		bool keptUnpacked = false;
-		const qint64 freed = RemoveUnpackedDatabase(target.binary, &removed, &keptUnpacked);
-		if (!removed.isEmpty()) {
-			emit Log(QString("[cleanup] %1: removed the unpacked database IDA left behind (%2): %3")
-						 .arg(target.label, FormatMegabytes(freed), removed.join(' ')));
-		} else if (keptUnpacked) {
-			emit Log(QString("[warn] %1: an unpacked database is present but there is no packed .i64 — kept it; "
-							 "open it in IDA to pack it")
-						 .arg(target.label));
+			ReleaseDatabase(path);
 		}
 	}
-	emit Log(QString("stop: %1 instance(s).").arg(n));
-	Refresh();
 }
 
 // Move a target's database aside (<part>.ida-workbench.bak), first recovering any
@@ -1814,7 +1512,6 @@ static QString FormatDuration(qint64 ms) {
 	return s < 60 ? QString("%1s").arg(s) : QString("%1m %2s").arg(s / 60).arg(s % 60, 2, 10, QChar('0'));
 }
 
-
 struct Manager::ActiveAnalyze {
 	Target target;
 	QString label, bin, db, binaryBackup;
@@ -1828,8 +1525,12 @@ struct Manager::ActiveAnalyze {
 	bool timedOut = false;
 };
 
+// Compares the path each job captured when it was issued, not a fresh resolution.
+bool Manager::AnalyzingDatabase(const QString& key) const {
+	return std::any_of(_analyzeJobs.cbegin(), _analyzeJobs.cend(), [&key](const ActiveAnalyze* job) { return DatabaseKey(job->bin) == key; });
+}
+
 void Manager::Analyze(const QVector<Target>& targets, bool force) {
-	PollIdaProcesses();
 	int launched = 0;
 	int skipped = 0;
 	for (const Target& target : targets) {
@@ -1840,16 +1541,14 @@ void Manager::Analyze(const QVector<Target>& targets, bool force) {
 		}
 		const QString key = TargetKey(target);
 		const auto resolved = ResolveTarget(target);
-		if (!resolved) { ++skipped; continue; }
+		if (!resolved) {
+			++skipped;
+			continue;
+		}
 		const Instance inst = *resolved;
 		const QString label = QString("%1@%2").arg(inst.name, inst.tag);
 		if (TargetBusy(target)) {
 			emit Log(QString("[skip] %1: database is already in use").arg(label));
-			++skipped;
-			continue;
-		}
-		if (PortUp(inst.port, 100)) {
-			emit Log(QString("[skip] %1: server running - stop it first").arg(label));
 			++skipped;
 			continue;
 		}
@@ -1943,8 +1642,7 @@ void Manager::Analyze(const QVector<Target>& targets, bool force) {
 				job->tail = job->tail.right(4096);
 			}
 		});
-		connect(job->process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-			[this, key](int, QProcess::ExitStatus) { FinalizeAnalyze(key); });
+		connect(job->process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this, [this, key](int, QProcess::ExitStatus) { FinalizeAnalyze(key); });
 		connect(job->process, &QProcess::errorOccurred, this, [this, key](QProcess::ProcessError error) {
 			if (error == QProcess::FailedToStart) {
 				QTimer::singleShot(0, this, [this, key] { FinalizeAnalyze(key); });
@@ -1967,9 +1665,7 @@ void Manager::Analyze(const QVector<Target>& targets, bool force) {
 		job->timeout->start(2 * 60 * 60 * 1000);
 		++launched;
 	}
-	emit Log(launched ? QString("analyze: %1 started in parallel%2.").arg(launched)
-		.arg(skipped ? QString(", %1 skipped").arg(skipped) : QString()) :
-		QString("analyze: nothing to do (%1 skipped).").arg(skipped));
+	emit Log(launched ? QString("analyze: %1 started in parallel%2.").arg(launched).arg(skipped ? QString(", %1 skipped").arg(skipped) : QString()) : QString("analyze: nothing to do (%1 skipped).").arg(skipped));
 }
 
 void Manager::StopOperations(const QVector<Target>& targets) {
@@ -1996,15 +1692,14 @@ void Manager::FinalizeAnalyze(const QString& key) {
 	job->timeout->stop();
 	job->tail += job->process->readAllStandardError() + job->process->readAllStandardOutput();
 	QFile::remove(job->bin + ".asm");
-	const bool success = !job->stopped && !job->timedOut &&
-		job->process->exitStatus() == QProcess::NormalExit && job->process->exitCode() == 0 && QFile::exists(job->db);
+	const bool success = !job->stopped && !job->timedOut && job->process->exitStatus() == QProcess::NormalExit && job->process->exitCode() == 0 && QFile::exists(job->db);
 	if (success) {
 		for (const QString& extension : job->backups) {
 			QFile::remove(job->bin + extension + ".ida-workbench.bak");
 		}
 		QFile::remove(job->binaryBackup);
 		emit Log(QString("[ok] %1 (%2) analyzed in %3")
-			.arg(job->label, FormatMegabytes(QFileInfo(job->bin).size()), FormatDuration(job->clock.elapsed())));
+					 .arg(job->label, FormatMegabytes(QFileInfo(job->bin).size()), FormatDuration(job->clock.elapsed())));
 	} else {
 		RestoreDatabase(job->bin, job->backups, job->binaryBackup, job->savedBinMtime);
 		if (job->stopped) {
@@ -2013,7 +1708,9 @@ void Manager::FinalizeAnalyze(const QString& key) {
 			emit Log(QString("[fail] %1: analysis timed out; previous database restored").arg(job->label));
 		} else {
 			emit Log(QString("[fail] %1 (idat rc=%2) %3; previous database restored")
-				.arg(job->label).arg(job->process->exitCode()).arg(QString::fromLocal8Bit(job->tail).right(300).trimmed()));
+						 .arg(job->label)
+						 .arg(job->process->exitCode())
+						 .arg(QString::fromLocal8Bit(job->tail).right(300).trimmed()));
 		}
 	}
 	emit AnalyzeFinished(job->target, success);
@@ -2027,6 +1724,9 @@ void Manager::FinalizeAnalyze(const QString& key) {
 }
 
 Manager::~Manager() {
+	_shuttingDown = true;
+	delete _mcp; // ~McpClient sends EOF so Nexus releases this session's leases
+	_mcp = nullptr;
 	for (ActiveAnalyze* job : _analyzeJobs) {
 		job->stopped = true;
 		QObject::disconnect(job->process, nullptr, this, nullptr);
@@ -2044,7 +1744,6 @@ Manager::~Manager() {
 }
 
 void Manager::Replace(const QVector<Target>& targets) {
-	PollIdaProcesses();
 	int n = 0;
 	const QString revision = QDateTime::currentDateTime().toString("yyyy-MM-dd_HH-mm-ss-zzz");
 	for (const Target& t : targets) {
@@ -2075,10 +1774,6 @@ void Manager::Replace(const QVector<Target>& targets) {
 		}
 		if (!inst->hasSource || inst->sourceBinary.isEmpty()) {
 			emit Log(QString("[skip] %1: no live source").arg(tag));
-			continue;
-		}
-		if (PortUp(inst->port, 100)) {
-			emit Log(QString("[skip] %1: server running — stop it first").arg(tag));
 			continue;
 		}
 
@@ -2189,8 +1884,7 @@ void Manager::Replace(const QVector<Target>& targets) {
 	Refresh();
 }
 
-void Manager::UpdateDepot(const QStringList& requestedTags, const QString& requestedManifest,
-	const QString& requestedUsername, const QString& requestedPassword, const QString& requestedAuthCode, bool rememberSession) {
+void Manager::UpdateDepot(const QStringList& requestedTags, const QString& requestedManifest, const QString& requestedUsername, const QString& requestedPassword, const QString& requestedAuthCode, bool rememberSession) {
 	// Refusing here is the one exit that reports no depot lifecycle at all, so it must
 	// stay unreachable from the UI (DoDepotUpdate holds the busy lock for the whole
 	// run): a caller that got past that guard would be left waiting for a signal that
@@ -2223,8 +1917,7 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 		}
 	};
 	const QString manifestSelection = requestedManifest.trimmed();
-	if (manifestSelection.compare("latest", Qt::CaseInsensitive) != 0 &&
-		!QRegularExpression("^[0-9]+$").match(manifestSelection).hasMatch()) {
+	if (manifestSelection.compare("latest", Qt::CaseInsensitive) != 0 && !QRegularExpression("^[0-9]+$").match(manifestSelection).hasMatch()) {
 		emit Log("[fail] Manifest selection must be Latest or a numeric ManifestID");
 		finishDepot();
 		return;
@@ -2233,8 +1926,7 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 	bool downloaderConfigChanged = false;
 	if (depotExecutable.isEmpty()) {
 		const QString configured = _depotDownloader.executable.trimmed();
-		const bool automatic = configured.isEmpty() || configured.compare("DepotDownloader.exe", Qt::CaseInsensitive) == 0 ||
-			configured.compare("DepotDownloader", Qt::CaseInsensitive) == 0;
+		const bool automatic = configured.isEmpty() || configured.compare("DepotDownloader.exe", Qt::CaseInsensitive) == 0 || configured.compare("DepotDownloader", Qt::CaseInsensitive) == 0;
 		if (!automatic) {
 			emit Log(QString("[fail] DepotDownloader executable does not exist: %1 (change it in Settings)").arg(configured));
 			finishDepot();
@@ -2298,64 +1990,38 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 			break;
 		}
 		const QString label = workspace.tag;
-		const DepotLayout layout = DepotLayoutFor(workspace.depot.appId, workspace.depot.os);
+		const DepotLayout layout = DepotLayoutFor(workspace.depot);
+		const QString depotOs = workspace.depot.os.isEmpty() ? QStringLiteral("any OS") : workspace.depot.os;
 		auto depotPath = [&layout](const QString& relative) {
 			return layout.pathPrefix.isEmpty() ? QDir::fromNativeSeparators(relative) :
-				QDir::fromNativeSeparators(layout.pathPrefix + "/" + relative);
+												 QDir::fromNativeSeparators(layout.pathPrefix + "/" + relative);
 		};
-		// Which binaries of this workspace are held right now, by absolute path. A depot
-		// update installs a brand-new <ManifestID> directory, so a module held under some
-		// other manifest is no reason to refuse the whole workspace: the paths matter only
-		// against the directory this update would replace, checked once that is known.
-		auto heldBinaries = [this, &label](const auto& jobs) {
-			QSet<QString> paths;
-			for (auto it = jobs.constBegin(); it != jobs.constEnd(); ++it) {
-				const QStringList parts = it.key().split('\t');
-				if (parts.value(0) != label) {
-					continue;
-				}
-				const auto held = ResolveTarget({parts.value(0), parts.value(1), parts.value(2)});
-				if (held) {
-					paths.insert(QDir::cleanPath(QFileInfo(held->binary).absoluteFilePath()).toLower());
-				}
-			}
-			return paths;
-		};
-		const QSet<QString> analyzing = heldBinaries(_analyzeJobs);
-		const QSet<QString> openInIda = heldBinaries(_idaPids);
-		// What holds this exact binary right now, or an empty string. Overwriting a file
-		// under a live session would pull the ground from under it; adding the modules
-		// beside it is what a completion is for, so the check is per file, never per tag.
-		auto heldBy = [this, &label, &analyzing, &openInIda](const QString& path) {
-			const QString key = QDir::cleanPath(QFileInfo(path).absoluteFilePath()).toLower();
-			if (analyzing.contains(key)) {
-				return QStringLiteral("analyzing");
-			}
-			if (openInIda.contains(key)) {
-				return QStringLiteral("open in IDA");
-			}
-			for (const Instance& instance : _instances) {
-				if (instance.tag == label && QDir::cleanPath(QFileInfo(instance.binary).absoluteFilePath()).toLower() == key && PidOnPort(instance.port) > 0) {
-					return QStringLiteral("MCP server running");
-				}
-			}
+		// What holds this exact binary right now, or an empty string. A depot update
+		// installs a brand-new <ManifestID> directory, so a module held under some other
+		// manifest is no reason to refuse the whole workspace. Overwriting a file under a
+		// live session would pull the ground from under it; adding the modules beside it
+		// is what a completion is for, so the check is per file, never per tag.
+		auto heldBy = [this](const QString& path) {
+			const QString key = DatabaseKey(path);
+			if (AnalyzingDatabase(key)) { return QStringLiteral("analyzing"); }
+			if (_opening.contains(key) || DatabaseOpen(key) || UnpackedDatabaseExists(path)) { return QStringLiteral("database is open"); }
 			return QString();
 		};
-		// A server keeps the database it was started with, so a new Current does not move
-		// it: say so, instead of leaving a row that reads UP next to a fresh binary.
+		// An open database keeps the file it was opened from, so a new Current does not
+		// move it: say so, instead of leaving a session next to a fresh binary.
 		auto warnStaleServers = [this, &label](const QString& selectedManifest) {
 			QStringList serving;
 			for (const Instance& instance : _instances) {
-				if (instance.tag == label && PidOnPort(instance.port) > 0) {
+				if (instance.tag == label && DatabaseOpen(DatabaseKey(instance.binary))) {
 					serving << instance.name;
 				}
 			}
 			if (!serving.isEmpty()) {
-				emit Log(QString("[warn] %1: %2 still serve the previous manifest — restart those MCP servers to pick up %3")
-					.arg(label, serving.join(", "), selectedManifest));
+				emit Log(QString("[warn] %1: %2 still use the previous manifest — release those databases and open the new paths for %3")
+							 .arg(label, serving.join(", "), selectedManifest));
 			}
 		};
-		emit Log(QString("[depot] %1: checking app %2 (%3), depot %4").arg(label).arg(workspace.depot.appId).arg(workspace.depot.os).arg(layout.depotId));
+		emit Log(QString("[depot] %1: checking app %2 (%3), depot %4").arg(label).arg(workspace.depot.appId).arg(depotOs).arg(layout.depotId));
 
 		QTemporaryDir manifestDir(QDir(workspace.output).filePath(".depot-manifest-XXXXXX"));
 		QStringList common{"-app", QString::number(workspace.depot.appId), "-depot", QString::number(layout.depotId)};
@@ -2366,6 +2032,23 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 		const QString password = requestedPassword.isEmpty() ? qEnvironmentVariable("STEAM_PASSWORD") : requestedPassword;
 		const QString authCode = requestedAuthCode.trimmed().isEmpty() ? qEnvironmentVariable("STEAM_GUARD_CODE").trimmed() : requestedAuthCode.trimmed();
 		const QByteArray authInput = authCode.isEmpty() ? QByteArray() : authCode.toUtf8() + '\n';
+		if (layout.accountRequired && username.isEmpty()) {
+			emit Log(QString("[fail] %1: depot %2 needs a Steam account that owns app %3 — enter it in the download dialog").arg(label).arg(layout.depotId).arg(workspace.depot.appId));
+			continue;
+		}
+		// Account-only apps need the same login for the manifest query and the files.
+		if (!username.isEmpty()) {
+			common << "-username" << username;
+			if (!password.isEmpty()) {
+				common << "-password" << password;
+			}
+			if (rememberSession) {
+				common << "-remember-password";
+			}
+			if (!authCode.isEmpty()) {
+				common << "-no-mobile";
+			}
+		}
 		QString manifestOutput;
 		QStringList manifestArgs = common;
 		manifestArgs << "-manifest-only" << "-dir" << manifestDir.path();
@@ -2379,8 +2062,7 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 			continue;
 		}
 		const QString latestManifest = manifestMatch.captured(1);
-		const QString manifest = manifestSelection.isEmpty() || manifestSelection.compare("latest", Qt::CaseInsensitive) == 0
-			? latestManifest : manifestSelection;
+		const QString manifest = manifestSelection.isEmpty() || manifestSelection.compare("latest", Qt::CaseInsensitive) == 0 ? latestManifest : manifestSelection;
 		const bool historicalImport = manifest != latestManifest;
 		QStringList downloadFiles = workspace.files;
 		if (!historicalImport) {
@@ -2409,12 +2091,17 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 		const QString manifestRoot = QDir(workspace.output).filePath(manifest);
 		bool complete = QDir(manifestRoot).exists();
 		for (const QString& relative : historicalImport ? QStringList{} : downloadFiles) {
-			if (!QFile::exists(QDir(manifestRoot).filePath(relative))) { complete = false; break; }
+			if (!QFile::exists(QDir(manifestRoot).filePath(relative))) {
+				complete = false;
+				break;
+			}
 		}
 		if (complete) {
 			QString patchVersion;
 			QString serverVersion;
-			ReadSteamVersions(QDir(manifestRoot).filePath("csgo/steam.inf"), &patchVersion, &serverVersion);
+			if (!layout.versionFile.isEmpty()) {
+				ReadSteamVersions(QDir(manifestRoot).filePath(layout.versionFile), &patchVersion, &serverVersion);
+			}
 			if (historicalImport) {
 				emit Log(QString("[depot] %1: manifest %2 is already stored").arg(label, manifest));
 				continue;
@@ -2450,25 +2137,14 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 		for (const QString& relative : downloadFiles) {
 			stream << depotPath(relative) << '\n';
 		}
-		const QString versionRelative = "csgo/steam.inf";
-		if (!workspace.files.contains(versionRelative)) {
+		// Known games ship a build stamp that labels each manifest; other depots have none.
+		const QString versionRelative = layout.versionFile;
+		if (!versionRelative.isEmpty() && !workspace.files.contains(versionRelative)) {
 			stream << depotPath(versionRelative) << '\n';
 		}
 		fileList.close();
 
 		QStringList downloadArgs = common;
-		if (!username.isEmpty()) {
-			downloadArgs << "-username" << username;
-			if (!password.isEmpty()) {
-				downloadArgs << "-password" << password;
-			}
-			if (rememberSession) {
-				downloadArgs << "-remember-password";
-			}
-			if (!authCode.isEmpty()) {
-				downloadArgs << "-no-mobile";
-			}
-		}
 		// DepotDownloader's normal anonymous path resolves the current manifest itself.
 		// Pinning even the latest GID with -manifest unnecessarily requires a manifest request code.
 		if (historicalImport) {
@@ -2478,19 +2154,17 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 		QString downloadOutput;
 		emit Log(QString("[depot] %1: downloading manifest %2 (%3 files)").arg(label, manifest).arg(downloadFiles.size()));
 		if (!run(downloadArgs, &downloadOutput, authInput)) {
-			const bool authenticationRequired = historicalImport &&
-				(downloadOutput.contains("401", Qt::CaseInsensitive) || downloadOutput.contains("No manifest request code", Qt::CaseInsensitive));
-			const bool loginSucceeded = !username.isEmpty() &&
-				(downloadOutput.contains("Got session token", Qt::CaseInsensitive) || downloadOutput.contains("Got AppInfo", Qt::CaseInsensitive));
+			const bool authenticationRequired = historicalImport && (downloadOutput.contains("401", Qt::CaseInsensitive) || downloadOutput.contains("No manifest request code", Qt::CaseInsensitive));
+			const bool loginSucceeded = !username.isEmpty() && (downloadOutput.contains("Got session token", Qt::CaseInsensitive) || downloadOutput.contains("Got AppInfo", Qt::CaseInsensitive));
 			if (authenticationRequired && loginSucceeded) {
 				emit Log(QString("[fail] %1: Steam login succeeded, but ManifestID %2 was not resolved for %3 depot %4. Verify that the ID belongs to this depot; otherwise the publisher has disabled that old manifest.")
-					.arg(label, manifest, workspace.depot.os, QString::number(layout.depotId)));
+							 .arg(label, manifest, depotOs, QString::number(layout.depotId)));
 			} else if (authenticationRequired && username.isEmpty()) {
 				emit Log(QString("[fail] %1: ManifestID %2 was not resolved anonymously for %3 depot %4. Verify the depot/OS; a valid old ID may require Steam account access.")
-					.arg(label, manifest, workspace.depot.os, QString::number(layout.depotId)));
+							 .arg(label, manifest, depotOs, QString::number(layout.depotId)));
 			} else if (authenticationRequired) {
 				emit Log(QString("[fail] %1: Steam authentication for '%2' did not complete, or ManifestID %3 does not belong to %4 depot %5. Check the credentials, Guard code and depot/OS.")
-					.arg(label, username, manifest, workspace.depot.os, QString::number(layout.depotId)));
+							 .arg(label, username, manifest, depotOs, QString::number(layout.depotId)));
 			} else {
 				emit Log(QString("[fail] %1: DepotDownloader failed: %2").arg(label, downloadOutput.right(1000).trimmed()));
 			}
@@ -2513,14 +2187,16 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 			}
 		}
 
-		const QString stagedSteamInf = QDir(stage.path()).filePath(depotPath(versionRelative));
+		const QString stagedSteamInf = versionRelative.isEmpty() ? QString() : QDir(stage.path()).filePath(depotPath(versionRelative));
 		QString patchVersion;
 		QString serverVersion;
-		ReadSteamVersions(stagedSteamInf, &patchVersion, &serverVersion);
-		if (!historicalImport && workspace.depot.appId == 730 && (patchVersion.isEmpty() || serverVersion.isEmpty())) {
+		if (!stagedSteamInf.isEmpty()) {
+			ReadSteamVersions(stagedSteamInf, &patchVersion, &serverVersion);
+		}
+		if (!historicalImport && !layout.versionFallbackUrl.isEmpty() && (patchVersion.isEmpty() || serverVersion.isEmpty())) {
 			QByteArray steamInf;
 			QString steamInfError;
-			if (DownloadUrl(QUrl("https://raw.githubusercontent.com/SteamDatabase/GameTracking-CS2/master/game/csgo/steam.inf"), 30000, &steamInf, &steamInfError)) {
+			if (DownloadUrl(QUrl(layout.versionFallbackUrl), 30000, &steamInf, &steamInfError)) {
 				QDir().mkpath(QFileInfo(stagedSteamInf).absolutePath());
 				QSaveFile file(stagedSteamInf);
 				if (!file.open(QIODevice::WriteOnly) || file.write(steamInf) != steamInf.size() || !file.commit()) {
@@ -2588,39 +2264,42 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 				}
 				// An analyzer has that database moved aside and half-rewritten; copying it now
 				// would plant a corrupt .i64 under the new manifest.
-				if (analyzing.contains(QDir::cleanPath(QFileInfo(previous).absoluteFilePath()).toLower())) {
+				if (AnalyzingDatabase(DatabaseKey(previous))) {
 					emit Log(QString("[warn] %1: %2 is being analyzed — its database is not carried into manifest %3")
-						.arg(label, moduleName, manifest));
+								 .arg(label, moduleName, manifest));
 					continue;
 				}
 				// Unpacked parts mean the database is open (or a kill left them): only the
 				// packed file is a consistent snapshot, the session's own work is not ours.
 				bool unpacked = false;
 				for (const QString& ext : kUnpackedDbExts) {
-					if (QFile::exists(previous + ext)) { unpacked = true; break; }
+					if (QFile::exists(previous + ext)) {
+						unpacked = true;
+						break;
+					}
 				}
 				for (const QString& ext : unpacked ? QStringList{".i64", ".idb"} : kDbExts) {
 					QString sidecarError;
 					if (QFile::exists(previous + ext) && !QFile::exists(destination + ext) && !CopyFileAtomically(previous + ext, destination + ext, &sidecarError)) {
 						emit Log(QString("[warn] %1: could not carry %2 into manifest %3: %4 — press Analyze there")
-							.arg(label, QFileInfo(previous + ext).fileName(), manifest, sidecarError));
+									 .arg(label, QFileInfo(previous + ext).fileName(), manifest, sidecarError));
 					}
 				}
 				if (unpacked) {
 					emit Log(QString("[warn] %1: %2 has an unpacked database beside it (open in IDA, or left by a kill) — "
 									 "manifest %3 gets only the packed copy")
-						.arg(label, moduleName, manifest));
+								 .arg(label, moduleName, manifest));
 				}
 			}
 		}
-		if (ok && QFile::exists(stagedSteamInf) && !downloadFiles.contains(versionRelative)) {
+		if (ok && !stagedSteamInf.isEmpty() && QFile::exists(stagedSteamInf) && !downloadFiles.contains(versionRelative)) {
 			ok = CopyFileAtomically(stagedSteamInf, QDir(installRoot).filePath(versionRelative), &error);
 		}
 		if (!ok) {
 			// In-place completion writes every file atomically on its own, so a failure here
 			// leaves a directory that is merely still incomplete — the next run continues it.
 			emit Log(QString("[fail] %1: cannot %2 manifest %3: %4")
-				.arg(label, completeInPlace ? QStringLiteral("complete") : QStringLiteral("prepare"), manifest, error));
+						 .arg(label, completeInPlace ? QStringLiteral("complete") : QStringLiteral("prepare"), manifest, error));
 			continue;
 		}
 		if (!unchanged.isEmpty()) {
@@ -2628,7 +2307,7 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 		}
 		if (!inUse.isEmpty()) {
 			emit Log(QString("[skip] %1: %2 changed under manifest %3 but is in use — not replaced; stop it and update again")
-				.arg(label, inUse.join(", "), manifest));
+						 .arg(label, inUse.join(", "), manifest));
 		}
 
 		if (!completeInPlace) {
@@ -2651,8 +2330,7 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 			if (!serverVersion.isEmpty()) {
 				versionDetails << "ServerVersion " + serverVersion;
 			}
-			emit Log(QString("[manifest] %1 stored %2%3").arg(label, manifest,
-				versionDetails.isEmpty() ? QString() : ": " + versionDetails.join(", ")));
+			emit Log(QString("[manifest] %1 stored %2%3").arg(label, manifest, versionDetails.isEmpty() ? QString() : ": " + versionDetails.join(", ")));
 		} else {
 			const bool manifestChanged = workspace.depot.manifest != manifest;
 			workspace.depot.manifest = manifest;
@@ -2667,8 +2345,7 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 			if (!serverVersion.isEmpty()) {
 				versionDetails << "ServerVersion " + serverVersion;
 			}
-			emit Log(QString("[depot] %1 Current is %2%3").arg(label, manifest,
-				versionDetails.isEmpty() ? QString() : ": " + versionDetails.join(", ")));
+			emit Log(QString("[depot] %1 Current is %2%3").arg(label, manifest, versionDetails.isEmpty() ? QString() : ": " + versionDetails.join(", ")));
 			if (manifestChanged) {
 				warnStaleServers(manifest);
 			}
@@ -2691,20 +2368,18 @@ void Manager::UpdateDepot(const QStringList& requestedTags, const QString& reque
 
 ConfigView Manager::View() const {
 	ConfigView v;
-	v.host = _host;
+	v.uvx = _uvx;
 	v.idaGui = _idaGui;
 	v.idaText = _idaText;
 	v.logDir = _logDir;
 	v.analysisArgs = _analysisArgs;
 	v.configPath = _configPath;
 	v.maxLogMB = _maxLogMB;
-	v.basePort = _basePort;
 	v.depotDownloader = _depotDownloader;
 	for (const Workspace& workspace : _workspaces) {
 		(workspace.depot.enabled ? v.steamWorkspaces : v.workspaces) << workspace;
 	}
 	v.extraLibs = _extraLibs;
-	v.portOverrides = _portOverrides;
 	return v;
 }
 
@@ -2715,7 +2390,11 @@ void Manager::SaveConfig(const ConfigView& cfgIn) {
 	// depend on that for memory safety.
 	if (!_depotTags.isEmpty()) {
 		emit Log("[skip] save: a depot update is running — the configuration is locked until it finishes");
-		emit ConfigSaveFinished(false, "A depot update is running. Try again when it finishes.");
+		emit ConfigSaveFinished(false, "Finish active operations before changing configuration.");
+		return;
+	}
+	if ((!_leases.isEmpty() || !_opening.isEmpty() || !_analyzeJobs.isEmpty()) && (cfgIn.uvx != _uvx || cfgIn.idaGui != _idaGui || cfgIn.idaText != _idaText)) {
+		emit ConfigSaveFinished(false, "Release databases and finish analyses before changing IDA or MCP paths.");
 		return;
 	}
 	ConfigView cfg = cfgIn;
@@ -2734,117 +2413,27 @@ void Manager::SaveConfig(const ConfigView& cfgIn) {
 	}
 
 	QJsonObject root;
-	root["host"] = cfg.host.trimmed();
+	root["schemaVersion"] = 2;
+	root["mcp"] = QJsonObject{{"executable", cfg.uvx.trimmed()}};
 	root["logDir"] = cfg.logDir.trimmed();
 	root["maxLogSizeMB"] = (cfg.maxLogMB >= 0 && cfg.maxLogMB <= MAX_LOG_MB_CEILING) ? cfg.maxLogMB : DEFAULT_MAX_LOG_MB;
 	root["analysisArgs"] = cfg.analysisArgs.trimmed();
-	root["scanBasePort"] = (cfg.basePort >= 1024 && cfg.basePort <= 60000) ? cfg.basePort : DEFAULT_BASE_PORT;
 	root["ida"] = QJsonObject{{"gui", cfg.idaGui.trimmed()}, {"text", cfg.idaText.trimmed()}};
 	root["depotDownloader"] = QJsonObject{
 		{"executable", cfg.depotDownloader.executable.trimmed().isEmpty() ? "DepotDownloader.exe" : cfg.depotDownloader.executable.trimmed()},
-		{"timeoutMinutes", qBound(1, cfg.depotDownloader.timeoutMinutes, 240)}};
-
-	auto saveWorkspaces = [](const QVector<Workspace>& source, bool steam) {
-		QJsonArray result;
-		for (const Workspace& workspace : source) {
-			if (workspace.tag.trimmed().isEmpty()) {
-				continue;
-			}
-		QJsonObject object{{"tag", workspace.tag.trimmed()}};
-		if (steam) {
-			object["dir"] = workspace.output.trimmed();
-		} else {
-			object["source"] = workspace.source.trimmed();
-			object["output"] = workspace.output.trimmed();
-		}
-		QJsonArray files;
-		for (const QString& file : workspace.files) {
-			if (!file.trimmed().isEmpty()) {
-				files.append(QDir::cleanPath(file.trimmed()));
-			}
-		}
-		object["files"] = files;
-		object["portOffset"] = workspace.portOffset;
-		object["color"] = workspace.color.trimmed().isEmpty() ? GeneratedTagColor(workspace.tag.trimmed()) : workspace.color.trimmed();
-			if (steam) {
-				object["appId"] = workspace.depot.appId;
-				object["os"] = workspace.depot.os;
-				if (!workspace.depot.manifest.isEmpty()) {
-					object["current"] = workspace.depot.manifest;
-				}
-		}
-		result.append(object);
-		}
-		return result;
+		{"timeoutMinutes", qBound(1, cfg.depotDownloader.timeoutMinutes, 240)}
 	};
-	root["workspaces"] = saveWorkspaces(cfg.workspaces, false);
-	root["steamWorkspaces"] = saveWorkspaces(cfg.steamWorkspaces, true);
 
-	// Hand-edited (tag, name) ports: write only genuine overrides (a port that
-	// differs from the auto value) for a library the tag still tracks. Sorted so
-	// the file diff is stable; the key is dropped entirely when none remain.
-	auto tracks = [&cfg](const QString& tag, const QString& name) {
-		for (const Workspace& workspace : AllWorkspaces(cfg)) {
-			if (workspace.tag.trimmed() == tag) {
-				for (const QString& file : workspace.files) {
-					if (QFileInfo(file).completeBaseName() == name) {
-						return true;
-					}
-				}
-			}
-		}
-		return false;
-	};
-	QVector<PortOverride> keep;
-	for (const PortOverride& po : cfg.portOverrides) {
-		const QString tg = po.tag.trimmed();
-		const QString nm = po.name.trimmed();
-		if (po.port <= 0 || !tracks(tg, nm)) {
-			continue; // drop orphaned overrides
-		}
-		int autoPort = -1;
-		for (const Workspace& workspace : AllWorkspaces(cfg)) {
-			if (workspace.tag.trimmed() == tg) {
-				for (int fileIndex = 0; fileIndex < workspace.files.size(); ++fileIndex) {
-					if (QFileInfo(workspace.files[fileIndex]).completeBaseName() == nm) {
-						autoPort = AutoScanPort(cfg.basePort, fileIndex, workspace.portOffset);
-						break;
-					}
-				}
-				break;
-			}
-		}
-		if (po.port == autoPort) {
-			continue;
-		}
-		keep.push_back({tg, nm, po.port});
-	}
-	std::sort(keep.begin(), keep.end(), [](const PortOverride& a, const PortOverride& b) {
-		return a.tag == b.tag ? a.name < b.name : a.tag < b.tag;
-	});
-	if (keep.isEmpty()) {
-		root.remove("portOverrides");
-	} else {
-		QJsonArray ov;
-		for (const PortOverride& po : keep) {
-			ov.append(QJsonObject{{"tag", po.tag}, {"name", po.name}, {"port", po.port}});
-		}
-		root["portOverrides"] = ov;
-	}
+	root["workspaces"] = WorkspacesJson(cfg.workspaces, false);
+	root["steamWorkspaces"] = WorkspacesJson(cfg.steamWorkspaces, true);
 
-	// The port of a single library is always written out, never left to the index-derived
-	// default. That default moves when an earlier library is removed, which would silently
-	// renumber every library after it — including endpoints already pasted into an MCP
-	// client. Writing the resolved port pins what the table was showing; "Base port" then
-	// applies to workspace modules and to libraries added later.
 	QJsonArray extra;
 	for (int index = 0; index < cfg.extraLibs.size(); ++index) {
 		const ExtraLib& e = cfg.extraLibs[index];
 		if (e.tag.isEmpty() || e.path.isEmpty()) {
 			continue;
 		}
-		QJsonObject o{{"tag", e.tag.trimmed()}, {"path", e.path.trimmed()},
-			{"port", e.port > 0 ? e.port : AutoExtraPort(cfg.basePort, index)}};
+		QJsonObject o{{"tag", e.tag.trimmed()}, {"path", e.path.trimmed()}};
 		o["color"] = e.color.trimmed().isEmpty() ? GeneratedTagColor(e.tag.trimmed()) : e.color.trimmed();
 		extra.append(o);
 	}
@@ -2883,7 +2472,7 @@ void Manager::SaveConfig(const ConfigView& cfgIn) {
 void Manager::ImportConfig(const QString& sourcePath) {
 	if (!_depotTags.isEmpty()) { // same reason as SaveConfig: a live depot holds _workspaces
 		emit Log("[skip] import: a depot update is running — the configuration is locked until it finishes");
-		emit ConfigSaveFinished(false, "A depot update is running. Try again when it finishes.");
+		emit ConfigSaveFinished(false, "Finish active operations before changing configuration.");
 		return;
 	}
 	const QString src = QFileInfo(sourcePath).absoluteFilePath();

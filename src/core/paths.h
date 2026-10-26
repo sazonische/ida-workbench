@@ -17,7 +17,7 @@
 // anywhere, and the manager uses whatever it says.
 namespace Paths {
 
-	[[nodiscard]] inline QString AppHome() { return QDir::homePath() + "/.ida-workbench"; }
+	[[nodiscard]] inline QString AppHome() { return qEnvironmentVariable("IDA_WORKBENCH_HOME", QDir::homePath() + "/.ida-workbench"); }
 
 	[[nodiscard]] inline QString ConfigFile() { return QDir(AppHome()).filePath("config.json"); }
 
@@ -27,6 +27,6 @@ namespace Paths {
 
 	// The same folder as DefaultLogDir(), in the tilde form written into config.json so the
 	// file stays portable between machines and user names.
-	[[nodiscard]] inline QString DefaultLogDirSetting() { return QStringLiteral("~/.ida-workbench/logs"); }
+	[[nodiscard]] inline QString DefaultLogDirSetting() { return qEnvironmentVariableIsSet("IDA_WORKBENCH_HOME") ? DefaultLogDir() : QStringLiteral("~/.ida-workbench/logs"); }
 
 } // namespace Paths

@@ -7,8 +7,8 @@
 #include <QMainWindow>
 #include <QMap>
 #include <QPair>
-#include <QStringList>
 #include <QSet>
+#include <QStringList>
 #include <QVector>
 #include <Qt>
 
@@ -49,8 +49,7 @@ signals:
 	void RequestAnalyze(const QVector<Target>& targets, bool force);
 	void RequestStopOperations(const QVector<Target>& targets);
 	void RequestReplace(const QVector<Target>& targets);
-	void RequestDepotUpdate(const QStringList& tags, const QString& manifest, const QString& username,
-		const QString& password, const QString& authCode, bool rememberSession);
+	void RequestDepotUpdate(const QStringList& tags, const QString& manifest, const QString& username, const QString& password, const QString& authCode, bool rememberSession);
 	void RequestSaveConfig(const ConfigView& v);
 	void RequestImportConfig(const QString& sourcePath);
 	void RequestStoredVersion(const QString& tag, const QString& version);
@@ -87,9 +86,15 @@ private slots:
 
 private:
 	// The toolbar commands, for the shared eligibility rules below.
-	enum class Action { Start, OpenIda, Analyze, Replace, Depot, Delete, Stop };
+	enum class Action { Start,
+						OpenIda,
+						Analyze,
+						Replace,
+						Depot,
+						Delete,
+						Stop };
 
-	[[nodiscard]] QVector<Target> SelectedTargets() const;
+	[[nodiscard]] QVector<Target> SelectedTargets(bool checkedOnly = true) const; // visible rows, checked ones by default
 	// Why `action` cannot touch this target right now; empty string when it can. The
 	// single source of truth behind a button's enabled state, its tooltip and the
 	// batch the command actually runs on — they can never drift apart.
@@ -108,29 +113,27 @@ private:
 	void UpdateSortHeaders();	// tint each header by its sort state (no arrows)
 	void UpdateRowSelection(int row);
 	void ShowLibraryContextMenu(const QPoint& position);
-	void UpdateActionButtons();				   // enable/disable actions to fit the current selection
-	void EditPort(int row);					   // prompt for a new MCP port (double-click on the Port cell)
-	void ApplyPortEdit(int row, int newPort);  // persist an in-table port change
+	void UpdateActionButtons();								 // enable/disable actions to fit the current selection
 	[[nodiscard]] QColor TagColor(const QString& tag) const; // configured tag colour, with a deterministic fallback
-	void SaveUiState();						   // persist the log-splitter layout to ui-state.json
+	void SaveUiState();										 // persist the log-splitter layout to ui-state.json
 	void QueueRefresh();
 	void SetupTray();
-	[[nodiscard]] int RefreshIntervalMs() const; // brisk while a server is up (or booting), relaxed when idle
+	[[nodiscard]] int RefreshIntervalMs() const; // brisk while a database is open (or pending), relaxed when idle
 	[[nodiscard]] bool InstanceExists(const QString& name, const QString& tag) const;
-	void UpdateSpinTimer(); // run the spinner iff any cell is Analyzing… or Starting…
+	void UpdateSpinTimer(); // run the spinner iff any cell is Analyzing…, Opening… or Releasing…
 
 	// Per-instance facts used to decide which actions apply. Keyed by (name,tag)
 	// so a column sort (which reorders rows) never invalidates it.
 	struct RowState {
-		bool present = false;  // an instance exists here
-		bool up = false;	   // MCP server answering
+		bool present = false; // an instance exists here
+		bool up = false;	  // database visible through Nexus
+		bool owned = false;
+		QString backend;
 		bool hasDb = false;	   // .i64 present (can be served)
 		bool localBin = false; // binary present in output or the active revision
 		bool srcBin = false;   // binary present in the live source (can Replace/pull)
-		bool starting = false; // just launched, IDA still booting (port not up yet)
+		bool starting = false; // Nexus open or release still pending
 		bool analyzing = false;
-		bool idaOpen = false;
-		bool depot = false;
 	};
 	QHash<QString, RowState> _rowState;
 
@@ -148,12 +151,12 @@ private:
 	QTimer* _refreshTimer = nullptr;
 	QTimer* _spinTimer = nullptr; // drives the Analyzing… spinner
 	int _spinAngle = 0;
-	int _spinSec = -1;							  // last elapsed second painted into Analyzing… / Starting… cells
-	QHash<QString, QElapsedTimer> _analyzeClocks; // RowKey -> per-library analysis start (live elapsed)
-	QHash<QString, QElapsedTimer> _startingClocks; // RowKey -> Start requested; keeps Stop live while IDA boots
-	QHash<QString, QString> _activeOperations; // revision-aware TargetKey -> analyze / ida
+	int _spinSec = -1;							   // last elapsed second painted into Analyzing… / Starting… cells
+	QHash<QString, QElapsedTimer> _analyzeClocks;  // RowKey -> per-library analysis start (live elapsed)
+	QHash<QString, QElapsedTimer> _startingClocks; // RowKey -> pending Nexus open/release (Cell::opening)
+	QHash<QString, QString> _activeOperations;	   // revision-aware TargetKey -> analyze / opening
 	QSet<QString> _activeDepotTags;
-	QTimer* _refreshSpinTimer = nullptr;		  // spins the Refresh icon during a manual Refresh
+	QTimer* _refreshSpinTimer = nullptr; // spins the Refresh icon during a manual Refresh
 	int _refreshAngle = 0;
 	QPushButton* _startBtn = nullptr;
 	QPushButton* _openIdaBtn = nullptr;
@@ -186,7 +189,7 @@ private:
 	QComboBox* _versionCombo = nullptr;
 	QGroupBox* _versionField = nullptr;
 	QHash<QString, QString> _versionByTag;
-	int _view = 1;				 // 0 = list, 1 = tabs (HTML reference default)
+	int _view = 1; // 0 = list, 1 = tabs (HTML reference default)
 
 	QStackedWidget* _stack = nullptr; // main page vs settings page
 	QWidget* _mainPage = nullptr;

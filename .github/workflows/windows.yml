@@ -6,12 +6,8 @@ name: Windows
 # later step fails (see "Save vcpkg packages").
 on:
   push:
-    branches: [main]
-    # Tags are normally created by the release job itself; these patterns only keep a
-    # hand-pushed tag working, with or without the `v` prefix.
+    # No branch, PR or manual trigger: publishing starts with a pushed version tag.
     tags: ['v*', '[0-9]+.[0-9]+.[0-9]+']
-  pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -19,7 +15,7 @@ permissions:
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   # Never cancel a tag build half-way through: its artifact becomes a release.
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 defaults:
   run:
@@ -28,26 +24,40 @@ defaults:
 jobs:
   meta:
     name: Project version
+    if: github.event.deleted != true
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
       # On a tag, the tag *is* the version: it names the release, so the build reports it
-      # (-DIDA_WORKBENCH_VERSION) and the artifact is named after it. Releasing then never
-      # requires editing a file — create the tag (or the release) and CI follows. Off a
-      # tag, project(VERSION) from CMakeLists is the version, exactly as it is locally.
+      # (-DIDA_WORKBENCH_VERSION) and the artifact is named after it. Push the tag;
+      # project(VERSION) remains the default for local builds only.
       - id: version
         shell: bash
         run: |
+          if [ "$GITHUB_REF_TYPE" != tag ]; then
+            echo "::error::this workflow accepts version tags only"
+            exit 1
+          fi
           declared=$(sed -nE 's/^project\(ida_workbench VERSION ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' CMakeLists.txt)
           if [ -z "$declared" ]; then echo "project(VERSION ...) not found in CMakeLists.txt" >&2; exit 1; fi
-          version="$declared"
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            version="${GITHUB_REF_NAME#v}"
-            if [ "$version" != "$declared" ]; then
-              echo "::notice::building tag $GITHUB_REF_NAME as version $version; project(VERSION) still says $declared — the tag wins, syncing CMakeLists is optional"
+          version="${GITHUB_REF_NAME#v}"
+          if [[ ! "$version" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::release tags must be vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH (for example v2.0.0)"
+            exit 1
+          fi
+          # VERSIONINFO stores each component in 16 bits. Reject invalid versions
+          # before spending hours compiling Qt, and avoid shell integer overflow.
+          IFS=. read -r major minor patch <<< "$version"
+          for component in "$major" "$minor" "$patch"; do
+            if [ "${#component}" -gt 5 ] || [ "$component" -gt 65535 ]; then
+              echo "::error::Windows version components must be between 0 and 65535"
+              exit 1
             fi
+          done
+          if [ "$version" != "$declared" ]; then
+            echo "::notice::building tag $GITHUB_REF_NAME as version $version; project(VERSION) still says $declared — the tag wins, syncing CMakeLists is optional"
           fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "version $version (declared $declared, $GITHUB_REF_TYPE $GITHUB_REF_NAME)"
@@ -89,10 +99,11 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ${{ github.workspace }}/vcpkg-archives
-          key: vcpkg-qtbase-static-${{ steps.vcpkg.outputs.sha }}-${{ steps.vcpkg.outputs.spec_hash }}-${{ hashFiles('.github/vcpkg-triplets/*.cmake') }}
+          key: vcpkg-qtbase-static-complete-${{ steps.vcpkg.outputs.sha }}-${{ steps.vcpkg.outputs.spec_hash }}-${{ hashFiles('.github/vcpkg-triplets/*.cmake') }}
           # Same revision and spec first; then any older cache, because ports whose ABI did
           # not change (zlib, libpng, freetype, …) are still reused from it.
           restore-keys: |
+            vcpkg-qtbase-static-complete-${{ steps.vcpkg.outputs.sha }}-${{ steps.vcpkg.outputs.spec_hash }}-
             vcpkg-qtbase-static-${{ steps.vcpkg.outputs.sha }}-${{ steps.vcpkg.outputs.spec_hash }}-
             vcpkg-qtbase-static-
 
@@ -105,6 +116,7 @@ jobs:
       # --clean-buildtrees-after-build: qtbase's build tree is tens of gigabytes and the
       # runner disk is not.
       - name: Build static Qt
+        id: qt
         env:
           VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}/vcpkg-archives
         run: |
@@ -119,9 +131,10 @@ jobs:
 
       # Saved right after the expensive step and regardless of what follows: hours of
       # qtbase build must not be discarded because a test broke afterwards. Skipped on an
-      # exact hit — there is nothing new to store then.
+      # exact hit — there is nothing new to store then. Failed Qt builds must not
+      # occupy that immutable cache key with an incomplete package set.
       - name: Save vcpkg packages
-        if: always() && steps.vcpkg-cache.outputs.cache-hit != 'true'
+        if: always() && steps.qt.outcome == 'success' && steps.vcpkg-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           path: ${{ github.workspace }}/vcpkg-archives
@@ -136,13 +149,14 @@ jobs:
           cmake -B build-static -A x64
           -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
           -DVCPKG_TARGET_TRIPLET=x64-windows-static
+          -DBUILD_TESTING=ON
           "-DIDA_WORKBENCH_VERSION=${{ needs.meta.outputs.version }}"
 
       - name: Build
         run: cmake --build build-static --config Release
 
       - name: Test
-        run: ctest --test-dir build-static -C Release --output-on-failure
+        run: ctest --test-dir build-static -C Release --output-on-failure --no-tests=error
 
       # One file, nothing beside it. The python helpers are compiled into the exe and
       # unpacked next to config.json on launch, where ensureHelperScripts also refreshes
@@ -152,6 +166,10 @@ jobs:
         run: |
           $exe = "ida-workbench-${{ needs.meta.outputs.version }}-windows-x64.exe"
           Copy-Item build-static/Release/ida-workbench.exe $exe
+          $version = (Get-Item $exe).VersionInfo
+          if ($version.FileVersion -ne "${{ needs.meta.outputs.version }}" -or $version.ProductVersion -ne "${{ needs.meta.outputs.version }}") {
+            throw "Windows file version does not match the release tag"
+          }
           # "Static" is a claim worth checking: the whole point of this artifact is that it
           # needs nothing but Windows system DLLs beside it. dumpbin lives in the MSVC
           # toolchain, which is not on PATH outside a developer prompt.
@@ -160,6 +178,7 @@ jobs:
             Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $dumpbin) { throw "dumpbin not found under $vsRoot" }
           $deps = & $dumpbin.FullName /dependents $exe
+          if ($LASTEXITCODE -ne 0) { throw "dumpbin failed ($LASTEXITCODE)" }
           if ($deps -match 'Qt6|VCRUNTIME|MSVCP|api-ms-win-crt') {
             throw "the static exe still imports a Qt or MSVC runtime DLL:`n$($deps -join "`n")"
           }
@@ -170,10 +189,8 @@ jobs:
       # The free stand-in for code signing. A certificate costs more per year than this
       # tool earns, so SmartScreen will warn on first run no matter what CI does; an
       # attestation at least lets anyone prove the exe came out of this workflow, from
-      # this commit — `gh attestation verify <exe> --repo <owner>/<repo>`. Skipped for
-      # pull requests, where the token cannot mint one.
+      # this commit — `gh attestation verify <exe> --repo <owner>/<repo>`.
       - name: Attest build provenance
-        if: github.event_name == 'push'
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: ida-workbench-${{ needs.meta.outputs.version }}-windows-x64.exe
@@ -205,13 +222,9 @@ jobs:
 
   release:
     name: Publish release
-    # Two ways in, and neither involves uploading a file by hand:
-    #   * tag it — push a tag, or draft a release in the UI (which creates one). The tag
-    #     names the version, the exe is built reporting it and attached, and a release that
-    #     already exists just gets the missing asset.
-    #   * bump it — raise project(VERSION) and push to main; the tag and the release are
-    #     created for you. A version that is already tagged is a green no-op.
-    if: github.event_name == 'push'
+    # Publishing needs a pushed tag AND a successful build (including tests,
+    # packaging, attestation and artifact upload). CI never creates tags itself.
+    if: github.event_name == 'push' && github.ref_type == 'tag'
     needs: [meta, build]
     runs-on: ubuntu-latest
     permissions:
@@ -219,44 +232,55 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
+          name: ida-workbench-${{ needs.meta.outputs.version }}-windows-x64
           path: artifacts
-      - name: Create release
+      - name: Upload and publish release
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILD_COMMIT: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
           VERSION: ${{ needs.meta.outputs.version }}
         run: |
-          tag="$VERSION"
-          if [ "$GITHUB_REF_TYPE" = tag ]; then
-            tag="$GITHUB_REF_NAME" # keeps a `v` prefix if that is how the tag was written
-          else
-            # Off a tag, a version that is already tagged is simply nothing to do — that is
-            # the state of every ordinary push after a release, so it must not read as a
-            # failure. Releasing over it would also hang this exe off a tag pointing at
-            # different code, making the source archive disagree with the binary.
-            existing=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" --jq .object.sha 2>/dev/null || true)
-            if [ -n "$existing" ] && [ "$existing" != "$GITHUB_SHA" ]; then
-              echo "version $VERSION is already tagged at ${existing:0:7} — nothing to release."
-              echo "To ship this commit, tag it (or draft a release for it); the version comes from the tag."
-              exit 0
+          set -euo pipefail
+          asset="ida-workbench-$VERSION-windows-x64.exe"
+          file="artifacts/$asset"
+          if [ ! -s "$file" ]; then
+            echo "::error::missing or empty release asset: $file"
+            exit 1
+          fi
+
+          # Annotated tags point at tag objects; peel them to the actual commit.
+          # Refuse to publish if the tag was deleted or moved during the build.
+          ref=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG")
+          type=$(jq -r '.object.type' <<< "$ref")
+          commit=$(jq -r '.object.sha' <<< "$ref")
+          while [ "$type" = tag ]; do
+            ref=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$commit")
+            type=$(jq -r '.object.type' <<< "$ref")
+            commit=$(jq -r '.object.sha' <<< "$ref")
+          done
+          if [ "$type" != commit ] || [ "$commit" != "$BUILD_COMMIT" ]; then
+            echo "::error::tag $TAG no longer points at the built commit $BUILD_COMMIT"
+            exit 1
+          fi
+
+          if release=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft,assets); then
+            if [ "$(jq -r '.isDraft' <<< "$release")" = false ]; then
+              if jq -e --arg name "$asset" '.assets | any(.name == $name)' >/dev/null <<< "$release"; then
+                echo "release $TAG already carries $asset; nothing to publish"
+                exit 0
+              fi
+              echo "::error::release $TAG is already public without $asset; use a new version tag"
+              exit 1
             fi
+          else
+            # --verify-tag refuses to manufacture a tag. Keep the release private
+            # until the binary is attached; an upload failure leaves only a draft.
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag \
+              --title "IDA Workbench $TAG" --generate-notes --draft
           fi
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            # The release exists — most often because this version was already published, in
-            # which case there is nothing to do. But a release created by hand can sit there
-            # with no binary attached, and silently leaving it empty is the worse outcome, so
-            # missing assets are filled in. Existing ones are never overwritten.
-            attached=" $(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | tr '\n' ' ') "
-            for file in artifacts/*/*; do
-              name=$(basename "$file")
-              case "$attached" in
-                *" $name "*) echo "release $tag already carries $name" ;;
-                *) echo "attaching $name to existing release $tag"
-                   gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$file" ;;
-              esac
-            done
-            exit 0
-          fi
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "IDA Workbench $tag" --generate-notes \
-            artifacts/*/*
+
+          # A rerun can finish an interrupted draft, but cannot alter a public release.
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "$file" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false

@@ -31,12 +31,11 @@ private:
 	void PickTagColor(QTableWidget* table, int row, int column);
 	void AddExtraFile();
 
-	QLineEdit* _host = nullptr;
+	QLineEdit* _uvx = nullptr;
 	QLineEdit* _gui = nullptr;
 	QLineEdit* _text = nullptr;
 	QLineEdit* _logDir = nullptr;
 	QLineEdit* _analysisArgs = nullptr;
-	QLineEdit* _basePort = nullptr;
 	QLineEdit* _maxLog = nullptr; // shared log size cap in MB; 0 = unlimited
 	QLineEdit* _depotExecutable = nullptr;
 	QLineEdit* _depotTimeout = nullptr;
@@ -44,7 +43,4 @@ private:
 	QTableWidget* _steamWorkspaces = nullptr;
 	QTableWidget* _extra = nullptr;
 	QString _configPath; // where config.json lives (info only, passed through)
-
-	// Carried through to Values() unchanged; edited on the main page.
-	QVector<PortOverride> _portOverrides;
 };

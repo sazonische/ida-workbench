@@ -1,15 +1,19 @@
 #include "settings_panel.h"
 #include "delegates.h"
+#include "mcp_client.h"
 #include "palette.h"
 #include "ui_util.h"
 #include "version.h"
 
 #include <QAbstractButton>
-#include <QColorDialog>
+#include <QApplication>
 #include <QCheckBox>
+#include <QClipboard>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDesktopServices>
 #include <QDir>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -28,6 +32,7 @@
 #include <QSet>
 #include <QStyle>
 #include <QTableWidget>
+#include <QUrl>
 #include <QVBoxLayout>
 
 static QWidget* SectionHeader(const QString& iconName, const QString& title, const QString& subtitle) {
@@ -69,6 +74,32 @@ static void SetFilesCell(QTableWidgetItem* item, const QStringList& files) {
 	item->setToolTip(files.isEmpty() ? "Double-click to add files" : files.join("\n"));
 	item->setTextAlignment(Qt::AlignCenter);
 	item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+}
+
+// A Steam row's Depot cell keeps the whole DepotConfig in UserRole and shows the depot
+// that will actually be downloaded: explicit, or the built-in one of a known game.
+static DepotConfig DepotFromCell(const QTableWidgetItem* item) {
+	const QVariantMap data = item ? item->data(Qt::UserRole).toMap() : QVariantMap();
+	DepotConfig depot;
+	depot.enabled = true;
+	depot.appId = data.value("appId", 730).toInt();
+	depot.os = data.value("os", "windows").toString();
+	depot.depotId = data.value("depotId", 0).toInt();
+	depot.pathPrefix = data.value("pathPrefix").toString();
+	depot.requiresLogin = data.value("requiresLogin", false).toBool();
+	depot.manifest = data.value("manifest").toString();
+	return depot;
+}
+
+static void SetDepotCell(QTableWidgetItem* item, const DepotConfig& depot) {
+	item->setData(Qt::UserRole, QVariantMap{{"appId", depot.appId}, {"os", depot.os}, {"depotId", depot.depotId}, {"pathPrefix", depot.pathPrefix}, {"requiresLogin", depot.requiresLogin}, {"manifest", depot.manifest}});
+	const DepotLayout layout = DepotLayoutFor(depot);
+	const QString os = depot.os.isEmpty() ? QStringLiteral("any OS") : depot.os;
+	item->setText(layout.depotId > 0 ? QString("%1 · %2 / %3").arg(depot.appId).arg(layout.depotId).arg(os) : QString("%1 / %2 — set DepotID").arg(depot.appId).arg(os));
+	item->setTextAlignment(Qt::AlignCenter);
+	item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+	item->setToolTip(QString("AppID · DepotID / OS — double-click to edit\nFiles relative to: %1\nCurrent ManifestID: %2")
+						 .arg(layout.pathPrefix.isEmpty() ? QStringLiteral("depot root") : layout.pathPrefix + "/", depot.manifest.isEmpty() ? QStringLiteral("none") : depot.manifest));
 }
 
 static QGroupBox* OutlinedField(const QString& label, QLineEdit* lineEdit) {
@@ -132,15 +163,12 @@ static QHBoxLayout* BtnRow(std::initializer_list<QPushButton*> buttons) {
 SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	QWidget(parent) {
 	setObjectName("appSurface");
-	_portOverrides = v.portOverrides; // carried through to Values() unchanged
-	_configPath = v.configPath;		  // info only — the file location is not editable
-	_host = new QLineEdit(v.host);
+	_configPath = v.configPath; // info only — the file location is not editable
+	_uvx = new QLineEdit(v.uvx);
 	_gui = new QLineEdit(v.idaGui);
 	_text = new QLineEdit(v.idaText);
 	_logDir = new QLineEdit(v.logDir);
 	_analysisArgs = new QLineEdit(v.analysisArgs);
-	_basePort = new QLineEdit(QString::number(v.basePort));
-	_basePort->setValidator(new QIntValidator(1024, 60000, _basePort));
 	_maxLog = new QLineEdit(QString::number(v.maxLogMB));
 	_maxLog->setValidator(new QIntValidator(0, 10240, _maxLog));
 	_depotExecutable = new QLineEdit(v.depotDownloader.executable);
@@ -183,29 +211,27 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	auto* srvLay = new QVBoxLayout(srvBox);
 	srvLay->setContentsMargins(0, 0, 0, 0);
 	srvLay->setSpacing(10);
-	srvLay->addWidget(SectionHeader("dns", "MCP servers", "— where the per-library servers bind"));
-	auto* srvRow = new QHBoxLayout;
-	srvRow->setSpacing(10);
-	auto* bpField = OutlinedField("Base port", _basePort);
-	bpField->setFixedWidth(220);
-	srvRow->addWidget(bpField);
-	srvRow->addWidget(OutlinedField("Host", _host), 1);
-	srvLay->addLayout(srvRow);
-	srvLay->addWidget(Ui::Hint("Ports are automatic: base port + a stable per-library slot + the tag's offset; "
-							   "single libraries get base port + 1000 + their index. Any individual port can be "
-							   "changed on the main page (double-click the Port cell)."));
-
-	// One field per setting: every widget is created once above, with its validator, and shown
-	// exactly once. Re-creating them here (as an earlier layout did) left the first copies on
-	// screen but unreachable from Values() — edits in them were silently dropped, and the
-	// validators went with the discarded pointers.
-	srvLay->addWidget(SectionHeader("download", "DepotDownloader", "— the tool Steam workspaces download with"));
-	auto* depotLay = new QHBoxLayout;
-	depotLay->addWidget(BrowseRow("DepotDownloader", _depotExecutable, this, false, "Select DepotDownloader executable"), 1);
-	auto* timeoutField = OutlinedField("Timeout (minutes)", _depotTimeout);
-	timeoutField->setFixedWidth(160);
-	depotLay->addWidget(timeoutField);
-	srvLay->addLayout(depotLay);
+	srvLay->addWidget(SectionHeader("dns", "Official Hex-Rays MCP", "— IDA 9.4 or newer"));
+	srvLay->addWidget(BrowseRow("uvx executable", _uvx, this, false, "Select uvx executable"));
+	auto* uvHelp = Ui::Hint(QString("uvx is included with uv and is required to launch the IDA MCP server.\n"
+									"Install uv in PowerShell: %1\n"
+									"Then restart Workbench, or select uvx.exe above and save.")
+								.arg(McpClient::UV_INSTALL_COMMAND));
+	uvHelp->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	srvLay->addWidget(uvHelp);
+	auto* copyUvInstall = Ui::IconButton("content_copy", "Copy uv install command", "tonal");
+	connect(copyUvInstall, &QPushButton::clicked, this, [copyUvInstall] {
+		QApplication::clipboard()->setText(McpClient::UV_INSTALL_COMMAND);
+		copyUvInstall->setText("Copied");
+	});
+	auto* uvGuide = Ui::IconButton("open_in_new", "uv installation guide", "text");
+	connect(uvGuide, &QPushButton::clicked, this, [] {
+		QDesktopServices::openUrl(QUrl("https://docs.astral.sh/uv/getting-started/installation/"));
+	});
+	srvLay->addLayout(BtnRow({copyUvInstall, uvGuide}));
+	srvLay->addWidget(Ui::Hint(QString("Workbench and your agents each launch the official server automatically. "
+									   "IDA Nexus shares open databases between them. Install the GUI plugin once with: %1")
+								   .arg(McpClient::PLUGIN_INSTALL_COMMAND)));
 
 	// Card 3: Folder Workspaces
 	auto* dirBox = new QGroupBox();
@@ -215,27 +241,24 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	dirLay->setSpacing(10);
 	dirLay->addWidget(SectionHeader("folder_special", "Folder workspaces", "— explicit Source folder + Output folder pairs for local builds"));
 
-	_workspaces = new QTableWidget(0, 6);
+	_workspaces = new QTableWidget(0, 5);
 	_workspaces->setHorizontalHeader(new TrailingInsetHeader(Qt::Horizontal, _workspaces));
-	_workspaces->setHorizontalHeaderLabels({"Tag", "Source root", "Output folder", "Files", "Port offset", "Color"});
+	_workspaces->setHorizontalHeaderLabels({"Tag", "Source root", "Output folder", "Files", "Color"});
 	_workspaces->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
 	_workspaces->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Stretch);
 	_workspaces->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
 	_workspaces->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Fixed);
-	_workspaces->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Fixed);
 	_workspaces->setColumnWidth(3, 90);
-	_workspaces->setColumnWidth(4, 90);
-	_workspaces->setColumnWidth(5, 110);
+	_workspaces->setColumnWidth(4, 110);
 	_workspaces->verticalHeader()->setVisible(false);
 	_workspaces->horizontalHeader()->setFixedHeight(40);
 	_workspaces->setMinimumHeight(120);
 	_workspaces->verticalHeader()->setDefaultSectionSize(40);
-	_workspaces->setItemDelegateForColumn(4, new PortOffsetDelegate(_workspaces));
 
 	connect(_workspaces, &QTableWidget::cellClicked, this, [this](int r, int c) {
 		if (c == 3) {
 			EditFiles(_workspaces, r);
-		} else if (c == 5) {
+		} else if (c == 4) {
 			PickTagColor(_workspaces, r, c);
 		}
 	});
@@ -255,36 +278,37 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 		}
 	});
 
-	// Card 4: Steam Workspaces
+	// Card 4: Steam — optional. Only Steam workspaces and DepotDownloader live here, so the
+	// rest of Settings reads as a plain binary workbench.
 	auto* steamBox = new QGroupBox();
 	steamBox->setObjectName("settingsCard");
 	auto* steamLay = new QVBoxLayout(steamBox);
 	steamLay->setContentsMargins(0, 0, 0, 0);
 	steamLay->setSpacing(10);
-	steamLay->addWidget(SectionHeader("download", "Steam workspaces", "— single directory per build; versions arrive via DepotDownloader"));
+	steamLay->addWidget(SectionHeader("download", "Steam games", "— optional: binaries of any Steam app, downloaded by depot"));
+	steamLay->addWidget(Ui::Hint("Each workspace is one depot of one app: its AppID and DepotID (both listed on SteamDB) plus the files to track. "
+								 "Every build is kept in its own ManifestID folder. Counter-Strike 2 and CS:GO fill in their depots automatically. "
+								 "Folder workspaces and libraries never need Steam."));
 
-	_steamWorkspaces = new QTableWidget(0, 6);
+	_steamWorkspaces = new QTableWidget(0, 5);
 	_steamWorkspaces->setHorizontalHeader(new TrailingInsetHeader(Qt::Horizontal, _steamWorkspaces));
-	_steamWorkspaces->setHorizontalHeaderLabels({"Tag", "Workspace dir", "Files", "Depot", "Port offset", "Color"});
+	_steamWorkspaces->setHorizontalHeaderLabels({"Tag", "Workspace dir", "Files", "Depot", "Color"});
 	_steamWorkspaces->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
 	_steamWorkspaces->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
 	_steamWorkspaces->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
 	_steamWorkspaces->horizontalHeader()->setSectionResizeMode(4, QHeaderView::Fixed);
-	_steamWorkspaces->horizontalHeader()->setSectionResizeMode(5, QHeaderView::Fixed);
 	_steamWorkspaces->setColumnWidth(2, 90);
-	_steamWorkspaces->setColumnWidth(3, 140);
-	_steamWorkspaces->setColumnWidth(4, 90);
-	_steamWorkspaces->setColumnWidth(5, 110);
+	_steamWorkspaces->setColumnWidth(3, 200);
+	_steamWorkspaces->setColumnWidth(4, 110);
 	_steamWorkspaces->verticalHeader()->setVisible(false);
 	_steamWorkspaces->horizontalHeader()->setFixedHeight(40);
 	_steamWorkspaces->setMinimumHeight(120);
 	_steamWorkspaces->verticalHeader()->setDefaultSectionSize(40);
-	_steamWorkspaces->setItemDelegateForColumn(4, new PortOffsetDelegate(_steamWorkspaces));
 
 	connect(_steamWorkspaces, &QTableWidget::cellClicked, this, [this](int r, int c) {
 		if (c == 2) {
 			EditFiles(_steamWorkspaces, r);
-		} else if (c == 5) {
+		} else if (c == 4) {
 			PickTagColor(_steamWorkspaces, r, c);
 		}
 	});
@@ -302,6 +326,17 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	auto* steamDel = Ui::IconButton("delete", "Remove selected", "text");
 	steamLay->addWidget(_steamWorkspaces);
 	steamLay->addLayout(BtnRow({steamAdd, steamDel}));
+	// One field per setting: every widget is created once above, with its validator, and shown
+	// exactly once. Re-creating them here (as an earlier layout did) left the first copies on
+	// screen but unreachable from Values() — edits in them were silently dropped, and the
+	// validators went with the discarded pointers.
+	auto* depotLay = new QHBoxLayout;
+	depotLay->addWidget(BrowseRow("DepotDownloader", _depotExecutable, this, false, "Select DepotDownloader executable"), 1);
+	auto* timeoutField = OutlinedField("Timeout (minutes)", _depotTimeout);
+	timeoutField->setFixedWidth(160);
+	depotLay->addWidget(timeoutField);
+	steamLay->addLayout(depotLay);
+	steamLay->addWidget(Ui::Hint("Left as DepotDownloader.exe, it is installed automatically on the first download."));
 	connect(steamAdd, &QPushButton::clicked, this, &SettingsPanel::AddSteamWorkspace);
 	connect(steamDel, &QPushButton::clicked, this, [this] {
 		if (_steamWorkspaces->currentRow() >= 0) {
@@ -315,22 +350,19 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	auto* extraLay = new QVBoxLayout(extraBox);
 	extraLay->setContentsMargins(0, 0, 0, 0);
 	extraLay->setSpacing(10);
-	extraLay->addWidget(SectionHeader("library_books", "Libraries", "— individual binaries, each with a tag and its own MCP port"));
-	_extra = new QTableWidget(0, 4);
+	extraLay->addWidget(SectionHeader("library_books", "Libraries", "— individual binaries grouped by tag"));
+	_extra = new QTableWidget(0, 3);
 	_extra->setHorizontalHeader(new TrailingInsetHeader(Qt::Horizontal, _extra));
-	_extra->setHorizontalHeaderLabels({"Tag", "Binary path", "Port", "Color"});
+	_extra->setHorizontalHeaderLabels({"Tag", "Binary path", "Color"});
 	_extra->horizontalHeader()->setSectionResizeMode(1, QHeaderView::Stretch);
 	_extra->horizontalHeader()->setSectionResizeMode(2, QHeaderView::Fixed);
-	_extra->horizontalHeader()->setSectionResizeMode(3, QHeaderView::Fixed);
-	_extra->setColumnWidth(2, 90);
-	_extra->setColumnWidth(3, 110);
+	_extra->setColumnWidth(2, 110);
 	_extra->verticalHeader()->setVisible(false);
 	_extra->horizontalHeader()->setFixedHeight(40);
 	_extra->setMinimumHeight(110);
 	_extra->verticalHeader()->setDefaultSectionSize(40);
-	_extra->setItemDelegateForColumn(2, new PortOffsetDelegate(_extra, 1024, 65535)); // absolute port, not an offset
 	connect(_extra, &QTableWidget::cellClicked, this, [this](int r, int c) {
-		if (c == 3) {
+		if (c == 2) {
 			PickTagColor(_extra, r, c);
 		}
 	});
@@ -405,6 +437,7 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	Ui::RoundedOutline(idaBox, 16.0, Pal::OUTLINE_VARIANT);
 	Ui::RoundedOutline(srvBox, 16.0, Pal::OUTLINE_VARIANT);
 	Ui::RoundedOutline(dirBox, 16.0, Pal::OUTLINE_VARIANT);
+	Ui::RoundedOutline(steamBox, 16.0, Pal::OUTLINE_VARIANT);
 	Ui::RoundedOutline(extraBox, 16.0, Pal::OUTLINE_VARIANT);
 	Ui::RoundedOutline(cfgBox, 16.0, Pal::OUTLINE_VARIANT);
 	Ui::RoundedOutline(aboutBox, 16.0, Pal::OUTLINE_VARIANT);
@@ -414,9 +447,9 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	Ui::OverlayVerticalScrollBar(_workspaces, _workspaces->horizontalHeader()->height() + 2);
 	Ui::OverlayVerticalScrollBar(_steamWorkspaces, _steamWorkspaces->horizontalHeader()->height() + 2);
 	Ui::OverlayVerticalScrollBar(_extra, _extra->horizontalHeader()->height() + 2);
-	_workspaces->setItemDelegateForColumn(5, new TrailingInsetDelegate(_workspaces));
-	_steamWorkspaces->setItemDelegateForColumn(5, new TrailingInsetDelegate(_steamWorkspaces));
-	_extra->setItemDelegateForColumn(3, new TrailingInsetDelegate(_extra));
+	_workspaces->setItemDelegateForColumn(4, new TrailingInsetDelegate(_workspaces));
+	_steamWorkspaces->setItemDelegateForColumn(4, new TrailingInsetDelegate(_steamWorkspaces));
+	_extra->setItemDelegateForColumn(2, new TrailingInsetDelegate(_extra));
 
 	for (QPushButton* button : {dirAdd, dirDel, steamAdd, steamDel, extraAdd, extraDel}) {
 		Ui::ClipRounded(button, 20.0);
@@ -427,7 +460,7 @@ SettingsPanel::SettingsPanel(const ConfigView& v, QWidget* parent) :
 	auto* bodyLay = new QVBoxLayout(body);
 	bodyLay->setContentsMargins(24, 4, 24, 16);
 	bodyLay->setSpacing(16);
-	bodyLay->addWidget(Ui::Hint("Tags identify builds in the MCP parser; for folder workspaces the Sync column flags "
+	bodyLay->addWidget(Ui::Hint("Tags identify builds in the library list; for folder workspaces the Sync column flags "
 								"whether each working copy still matches its configured Source (by content hash). "
 								"A red border marks a missing file."));
 	bodyLay->addWidget(idaBox);
@@ -477,12 +510,9 @@ void SettingsPanel::AddWorkspaceRow(const Workspace& workspace) {
 	auto* files = new QTableWidgetItem;
 	SetFilesCell(files, workspace.files);
 	_workspaces->setItem(r, 3, files);
-	auto* off = new QTableWidgetItem(QString::number(workspace.portOffset));
-	off->setTextAlignment(Qt::AlignCenter);
-	_workspaces->setItem(r, 4, off);
 	auto* col = new QTableWidgetItem;
 	ApplyTagSwatch(col, workspace.tag, workspace.color.isEmpty() ? Pal::AutoTagBg(workspace.tag).name() : workspace.color);
-	_workspaces->setItem(r, 5, col);
+	_workspaces->setItem(r, 4, col);
 }
 
 void SettingsPanel::AddSteamWorkspaceRow(const Workspace& workspace) {
@@ -494,22 +524,11 @@ void SettingsPanel::AddSteamWorkspaceRow(const Workspace& workspace) {
 	SetFilesCell(files, workspace.files);
 	_steamWorkspaces->setItem(r, 2, files);
 	auto* depot = new QTableWidgetItem;
-	QVariantMap depotData{{"appId", workspace.depot.appId},
-		{"os", workspace.depot.os},
-		{"manifest", workspace.depot.manifest}};
-	depot->setData(Qt::UserRole, depotData);
-	depot->setText(QString("%1 / %2").arg(workspace.depot.appId).arg(workspace.depot.os));
-	depot->setTextAlignment(Qt::AlignCenter);
-	depot->setFlags(depot->flags() & ~Qt::ItemIsEditable);
-	depot->setToolTip(QString("Double-click to edit\nCurrent ManifestID: %1")
-		.arg(workspace.depot.manifest.isEmpty() ? QStringLiteral("none") : workspace.depot.manifest));
+	SetDepotCell(depot, workspace.depot);
 	_steamWorkspaces->setItem(r, 3, depot);
-	auto* off = new QTableWidgetItem(QString::number(workspace.portOffset));
-	off->setTextAlignment(Qt::AlignCenter);
-	_steamWorkspaces->setItem(r, 4, off);
 	auto* col = new QTableWidgetItem;
 	ApplyTagSwatch(col, workspace.tag, workspace.color.isEmpty() ? Pal::AutoTagBg(workspace.tag).name() : workspace.color);
-	_steamWorkspaces->setItem(r, 5, col);
+	_steamWorkspaces->setItem(r, 4, col);
 }
 
 // Takes the table it was clicked in: three tables share this, and hardcoding one of them
@@ -535,40 +554,93 @@ void SettingsPanel::EditDepot(int row) {
 	if (!item) {
 		return;
 	}
-	const QVariantMap oldData = item->data(Qt::UserRole).toMap();
+	const DepotConfig old = DepotFromCell(item);
 	QDialog dialog(this);
-	dialog.setWindowTitle("Depot source");
-	dialog.setMinimumWidth(440);
+	dialog.setWindowTitle("Steam depot");
+	dialog.setMinimumWidth(560);
 	auto* layout = new QVBoxLayout(&dialog);
-	auto* appId = new QLineEdit(QString::number(oldData.value("appId", 730).toInt()));
+	auto* appId = new QLineEdit(QString::number(old.appId));
 	appId->setValidator(new QIntValidator(1, 2147483647, appId));
+	auto* depotId = new QLineEdit(old.depotId > 0 ? QString::number(old.depotId) : QString());
+	depotId->setValidator(new QIntValidator(1, 2147483647, depotId));
+	depotId->setPlaceholderText("built-in for CS2 / CS:GO");
+	auto* prefix = new QLineEdit(old.pathPrefix);
+	prefix->setPlaceholderText("depot root");
 	auto* osCombo = Ui::ComboBox();
-	osCombo->addItems({"windows", "linux"});
-	osCombo->setCurrentText(oldData.value("os", "windows").toString());
-	auto* idsLayout = new QHBoxLayout;
-	idsLayout->addWidget(OutlinedField("App ID", appId));
-	auto* osField = Ui::ComboField("Depot OS", osCombo);
-	idsLayout->addWidget(osField);
-	layout->addLayout(idsLayout);
+	for (const QString& os : {QStringLiteral("windows"), QStringLiteral("linux"), QStringLiteral("macos")}) {
+		osCombo->addItem(os, os);
+	}
+	osCombo->addItem("any", QString());
+	osCombo->setCurrentIndex(qMax(0, osCombo->findData(old.os)));
+	auto* login = new QCheckBox("Needs a Steam account that owns the app (most paid games)");
+	login->setChecked(old.requiresLogin);
+
+	auto* appRow = new QHBoxLayout;
+	appRow->addWidget(OutlinedField("App ID", appId), 1);
+	appRow->addWidget(Ui::ComboField("Depot OS", osCombo), 1);
+	layout->addLayout(appRow);
+	auto* depotRow = new QHBoxLayout;
+	depotRow->addWidget(OutlinedField("Depot ID", depotId), 1);
+	depotRow->addWidget(OutlinedField("Folder inside the depot", prefix), 1);
+	layout->addLayout(depotRow);
+	layout->addWidget(login);
+	auto* resolved = Ui::Hint(QString());
+	layout->addWidget(resolved);
+
+	auto* footer = new QHBoxLayout;
+	auto* steamDb = Ui::IconButton("manage_search", "Find depots on SteamDB", "text");
+	footer->addWidget(steamDb);
+	footer->addStretch();
 	auto* buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
+	footer->addWidget(buttons);
+	layout->addLayout(footer);
+
+	auto edited = [&old, appId, depotId, prefix, osCombo, login] {
+		DepotConfig depot = old;
+		depot.appId = appId->text().toInt();
+		depot.os = osCombo->currentData().toString();
+		depot.depotId = depotId->text().toInt();
+		depot.pathPrefix = QDir::fromNativeSeparators(prefix->text().trimmed());
+		depot.requiresLogin = login->isChecked();
+		return depot;
+	};
+	// Say which depot a download will really use, before Save rather than after a failed run.
+	auto refresh = [edited, resolved, buttons] {
+		const DepotConfig depot = edited();
+		const DepotLayout layout = DepotLayoutFor(depot);
+		if (depot.appId <= 0 || layout.depotId <= 0) {
+			resolved->setText("Enter the Depot ID that holds the files — SteamDB lists each app's depots with their OS.");
+		} else {
+			resolved->setText(QString("Downloads depot %1%2; files are listed relative to %3.%4")
+								  .arg(layout.depotId)
+								  .arg(depot.depotId > 0 ? QString() : QStringLiteral(" (built-in)"),
+									   layout.pathPrefix.isEmpty() ? QStringLiteral("the depot root") : layout.pathPrefix + "/",
+									   layout.accountRequired ? QStringLiteral(" Downloads ask for a Steam login.") : QString()));
+		}
+		buttons->button(QDialogButtonBox::Save)->setEnabled(depot.appId > 0 && layout.depotId > 0);
+	};
+	for (QLineEdit* input : {appId, depotId, prefix}) {
+		connect(input, &QLineEdit::textChanged, &dialog, [refresh](const QString&) { refresh(); });
+	}
+	connect(osCombo, &QComboBox::currentIndexChanged, &dialog, [refresh](int) { refresh(); });
+	connect(login, &QCheckBox::toggled, &dialog, [refresh](bool) { refresh(); });
+	connect(steamDb, &QPushButton::clicked, &dialog, [appId] {
+		QDesktopServices::openUrl(QUrl(QString("https://steamdb.info/app/%1/depots/").arg(appId->text().toInt())));
+	});
 	connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 	connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-	layout->addWidget(buttons);
+	refresh();
 	if (dialog.exec() != QDialog::Accepted) {
 		return;
 	}
-	QVariantMap data = oldData;
-	const int newAppId = appId->text().toInt();
-	const QString newOs = osCombo->currentText();
-	if (newAppId != oldData.value("appId", 730).toInt() || newOs != oldData.value("os", "windows").toString()) {
-		data["manifest"] = QString();
+	DepotConfig depot = edited();
+	const DepotLayout before = DepotLayoutFor(old);
+	const DepotLayout after = DepotLayoutFor(depot);
+	// A different depot or folder makes the stored Current pointer meaningless.
+	if (depot.appId != old.appId || before.depotId != after.depotId || before.pathPrefix != after.pathPrefix) {
+		depot.manifest.clear();
 	}
-	data["appId"] = newAppId;
-	data["os"] = newOs;
-	item->setData(Qt::UserRole, data);
-	item->setText(QString("%1 / %2").arg(newAppId).arg(newOs));
-	item->setToolTip(QString("Double-click to edit\nCurrent ManifestID: %1")
-		.arg(data.value("manifest").toString().isEmpty() ? QStringLiteral("none") : data.value("manifest").toString()));
+	SetDepotCell(item, depot);
 }
 
 void SettingsPanel::AddExtraRow(const ExtraLib& extraLib) {
@@ -576,14 +648,9 @@ void SettingsPanel::AddExtraRow(const ExtraLib& extraLib) {
 	_extra->insertRow(r);
 	_extra->setItem(r, 0, new QTableWidgetItem(extraLib.tag));
 	_extra->setItem(r, 1, new QTableWidgetItem(extraLib.path));
-	const int base = _basePort ? _basePort->text().trimmed().toInt() : 8500;
-	const int shownPort = extraLib.port > 0 ? extraLib.port : AutoExtraPort(base, r);
-	auto* off = new QTableWidgetItem(QString::number(shownPort));
-	off->setTextAlignment(Qt::AlignCenter);
-	_extra->setItem(r, 2, off);
 	auto* col = new QTableWidgetItem;
 	ApplyTagSwatch(col, extraLib.tag, extraLib.color);
-	_extra->setItem(r, 3, col);
+	_extra->setItem(r, 2, col);
 }
 
 // Edit the relative file paths of one workspace.
@@ -644,8 +711,7 @@ void SettingsPanel::EditFiles(QTableWidget* table, int row) {
 
 	connect(addBtn, &QPushButton::clicked, &dialog, [&dialog, list, isSteam, addFile] {
 		bool ok = false;
-		const QString pathText = QInputDialog::getText(&dialog, "Add file", isSteam ? "Path relative to depot game directory:" : "Path relative to Source:",
-			QLineEdit::Normal, QString(), &ok).trimmed();
+		const QString pathText = QInputDialog::getText(&dialog, "Add file", isSteam ? "Path relative to the depot folder:" : "Path relative to Source:", QLineEdit::Normal, QString(), &ok).trimmed();
 		if (ok && !pathText.isEmpty()) {
 			list->setCurrentItem(addFile(pathText));
 		}
@@ -675,9 +741,7 @@ void SettingsPanel::EditFiles(QTableWidget* table, int row) {
 	connect(buttonBox, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
 	connect(buttonBox, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
-	layout->addWidget(Ui::Hint(QString(isSteam
-		? "Paths are relative to the depot game directory and preserved under each ManifestID."
-		: "Files tracked under \"%1\". Every path is relative to Source and is preserved under Output and revisions.").arg(tag)));
+	layout->addWidget(Ui::Hint(QString(isSteam ? "Paths are relative to the depot folder shown in the Depot column and preserved under each ManifestID." : "Files tracked under \"%1\". Every path is relative to Source and is preserved under Output and revisions.").arg(tag)));
 	layout->addWidget(list, 1);
 	layout->addLayout(buttonsLayout);
 	layout->addWidget(buttonBox);
@@ -701,9 +765,9 @@ void SettingsPanel::ImportConfigFile() {
 		return;
 	}
 	const auto buttonPicked = QMessageBox::warning(this, "Import config", QString("Replace the whole configuration with\n%1?\n\n"
-																				 "If the file is invalid the current configuration is kept.")
-																			 .arg(QDir::toNativeSeparators(file)),
-												  QMessageBox::Ok | QMessageBox::Cancel);
+																				  "If the file is invalid the current configuration is kept.")
+																			  .arg(QDir::toNativeSeparators(file)),
+												   QMessageBox::Ok | QMessageBox::Cancel);
 	if (buttonPicked == QMessageBox::Ok) {
 		emit ImportRequested(file);
 	}
@@ -743,7 +807,6 @@ void SettingsPanel::AddWorkspace() {
 	workspace.tag = QFileInfo(source).fileName();
 	workspace.source = QDir::toNativeSeparators(source);
 	workspace.output = QDir::toNativeSeparators(output);
-	workspace.portOffset = _workspaces->rowCount() * 100;
 	workspace.color = Pal::AutoTagBg(workspace.tag).name();
 	AddWorkspaceRow(workspace);
 }
@@ -757,10 +820,10 @@ void SettingsPanel::AddSteamWorkspace() {
 	workspace.tag = QFileInfo(dir).fileName();
 	workspace.source = QDir::toNativeSeparators(dir);
 	workspace.output = QDir::toNativeSeparators(dir);
-	workspace.portOffset = (_workspaces->rowCount() + _steamWorkspaces->rowCount()) * 100;
 	workspace.color = Pal::AutoTagBg(workspace.tag).name();
 	workspace.depot.enabled = true;
 	AddSteamWorkspaceRow(workspace);
+	EditDepot(_steamWorkspaces->rowCount() - 1); // a Steam workspace is meaningless without its depot
 }
 
 void SettingsPanel::AddExtraFile() {
@@ -772,16 +835,13 @@ void SettingsPanel::AddExtraFile() {
 	extraLib.tag = "extra";
 	extraLib.path = QDir::toNativeSeparators(file);
 	extraLib.color = Pal::AutoTagBg(extraLib.tag).name();
-	// Pre-fill a port that will actually pass validation: the auto slot may be
-	// taken by a port override or another library (same logic as "Add binary").
-	extraLib.port = FirstFreeExtraPort(Values());
 	AddExtraRow(extraLib);
 	_extra->editItem(_extra->item(_extra->rowCount() - 1, 0));
 }
 
 ConfigView SettingsPanel::Values() const {
 	ConfigView view;
-	view.host = _host->text().trimmed();
+	view.uvx = _uvx->text().trimmed();
 	view.idaGui = _gui->text().trimmed();
 	view.idaText = _text->text().trimmed();
 	view.logDir = _logDir->text().trimmed();
@@ -800,11 +860,6 @@ ConfigView SettingsPanel::Values() const {
 		const int mb = _maxLog->text().trimmed().toInt(&ok);
 		view.maxLogMB = ok ? mb : 10;
 	}
-	{
-		bool ok = false;
-		const int bp = _basePort->text().trimmed().toInt(&ok);
-		view.basePort = ok ? bp : 8500;
-	}
 
 	auto getCellText = [](QTableWidget* tableWidget, int row, int col) {
 		auto* item = tableWidget->item(row, col);
@@ -818,8 +873,7 @@ ConfigView SettingsPanel::Values() const {
 		if (auto* item = _workspaces->item(r, 3)) {
 			workspace.files = item->data(Qt::UserRole).toStringList();
 		}
-		workspace.portOffset = getCellText(_workspaces, r, 4).toInt();
-		if (auto* item = _workspaces->item(r, 5)) {
+		if (auto* item = _workspaces->item(r, 4)) {
 			workspace.color = item->data(Qt::UserRole).toString().trimmed();
 		}
 		if (!workspace.tag.isEmpty()) {
@@ -831,18 +885,11 @@ ConfigView SettingsPanel::Values() const {
 		workspace.tag = getCellText(_steamWorkspaces, r, 0);
 		workspace.source = getCellText(_steamWorkspaces, r, 1);
 		workspace.output = workspace.source;
-		workspace.depot.enabled = true;
 		if (auto* item = _steamWorkspaces->item(r, 2)) {
 			workspace.files = item->data(Qt::UserRole).toStringList();
 		}
-		if (auto* item = _steamWorkspaces->item(r, 3)) {
-			const QVariantMap depot = item->data(Qt::UserRole).toMap();
-			workspace.depot.appId = depot.value("appId", 730).toInt();
-			workspace.depot.os = depot.value("os", "windows").toString();
-			workspace.depot.manifest = depot.value("manifest").toString();
-		}
-		workspace.portOffset = getCellText(_steamWorkspaces, r, 4).toInt();
-		if (auto* item = _steamWorkspaces->item(r, 5)) {
+		workspace.depot = DepotFromCell(_steamWorkspaces->item(r, 3));
+		if (auto* item = _steamWorkspaces->item(r, 4)) {
 			workspace.color = item->data(Qt::UserRole).toString().trimmed();
 		}
 		if (!workspace.tag.isEmpty()) {
@@ -853,14 +900,12 @@ ConfigView SettingsPanel::Values() const {
 		ExtraLib extraLib;
 		extraLib.tag = getCellText(_extra, r, 0);
 		extraLib.path = getCellText(_extra, r, 1);
-		extraLib.port = getCellText(_extra, r, 2).toInt(); // absolute port (SaveConfig drops it when == auto)
-		if (auto* item = _extra->item(r, 3)) {
+		if (auto* item = _extra->item(r, 2)) {
 			extraLib.color = item->data(Qt::UserRole).toString().trimmed();
 		}
 		if (!extraLib.tag.isEmpty() && !extraLib.path.isEmpty()) {
 			view.extraLibs << extraLib;
 		}
 	}
-	view.portOverrides = _portOverrides; // not editable here — pass through untouched
 	return view;
 }

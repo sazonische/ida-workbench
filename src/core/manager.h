@@ -3,21 +3,41 @@
 #include <QJsonObject>
 #include <QMetaType>
 #include <QObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
-#include <QSet>
 #include <QVector>
 #include <atomic>
 #include <optional>
 
+// Any Steam app works: a workspace names its depot explicitly. Known games also
+// have a built-in layout, used when no DepotID is given.
 struct DepotConfig {
 	bool enabled = false;
 	int appId = 730;
-	QString os = "windows";
-	QString manifest;             // last successfully installed manifest GID
+	QString os = "windows";		// DepotDownloader -os filter; empty = any
+	int depotId = 0;			// 0 = the built-in depot for appId/os
+	QString pathPrefix;			// depot folder the workspace's files are relative to
+	bool requiresLogin = false; // even Latest needs a Steam account that owns the app
+	QString manifest;			// last successfully installed manifest GID
 	QString patchVersion;
 	QString serverVersion;
 };
+
+struct DepotLayout {
+	int depotId = 0;
+	QString pathPrefix;
+	QString versionFile;		// workspace-relative steam.inf carrying PatchVersion/ServerVersion
+	QString versionFallbackUrl; // public copy of versionFile when the depot does not ship it
+	bool accountRequired = false;
+};
+
+// Built-in layouts of known games; CS2 and standalone CS:GO keep distinct depots.
+DepotLayout DepotLayoutFor(int appId, const QString& os);
+// A workspace's effective layout, shared by validation, downloading and the UI.
+DepotLayout DepotLayoutFor(const DepotConfig& depot);
+// Reads PatchVersion/ServerVersion from a steam.inf; missing keys leave the outputs untouched.
+void ReadSteamVersions(const QString& steamInfPath, QString* patchVersion, QString* serverVersion);
 
 struct DepotDownloaderConfig {
 	QString executable = "DepotDownloader.exe";
@@ -30,7 +50,6 @@ struct Workspace {
 	QString source;
 	QString output;
 	QStringList files;
-	int portOffset = 0;
 	QString color; // explicit tag pill colour (#RRGGBB); generated once when absent
 	DepotConfig depot;
 };
@@ -39,31 +58,8 @@ struct Workspace {
 struct ExtraLib {
 	QString tag;
 	QString path;
-	int port = 0;  // absolute MCP port; 0 = auto (basePort + 1000 + index)
 	QString color; // explicit tag pill colour (#RRGGBB); generated once when absent
 };
-
-// A hand-picked port for one (tag, library) instance, overriding the auto value.
-// Auto workspace port = basePort + fileIndex + tag portOffset; an override pins one
-// instance to an exact port and is stored so it survives restarts.
-struct PortOverride {
-	QString tag;
-	QString name;
-	int port = 0;
-};
-
-// Auto (unedited) MCP ports. The single source of truth for the port formula,
-// shared by Manager (RebuildInstances) and the UI (main-table port edits).
-inline int AutoScanPort(int basePort, int fileIndex, int tagOffset) { return basePort + fileIndex + tagOffset; }
-inline int AutoExtraPort(int basePort, int extraIndex) { return basePort + 1000 + extraIndex; }
-
-struct ConfigView;
-// The port a NEW extra library can take without colliding: the auto slot for the
-// next extra index, bumped past every port the configuration already occupies.
-// Quick-add paths ("Add binary", Settings "Add file…") pass the result as an
-// explicit port so adding never trips the collision check merely because the
-// auto slot is taken (SaveConfig drops the value again when it equals auto).
-int FirstFreeExtraPort(const ConfigView& cfg);
 
 // Best-effort scan of the usual install locations for an IDA install; fills the
 // GUI (ida) and text (idat) paths and returns true when a matching pair exists.
@@ -72,18 +68,16 @@ bool AutoDetectIda(QString* guiPath, QString* textPath);
 
 // Editable, OS-resolved snapshot of config.json for the settings dialog.
 struct ConfigView {
-	QString host;
+	QString uvx; // executable used to launch the official Hex-Rays MCP server
 	QString idaGui, idaText;
 	QString logDir;
-	QString analysisArgs;	   // optional extra idat switches; empty by default
-	QString configPath;		   // where the loaded config.json lives (info only, not saved)
-	int maxLogMB = 10;		   // trim the shared log's oldest lines; 0 = unlimited
-	int basePort = 8500;	   // base for auto ports; per-library ports derive from it
+	QString analysisArgs; // optional extra idat switches; empty by default
+	QString configPath;	  // where the loaded config.json lives (info only, not saved)
+	int maxLogMB = 10;	  // trim the shared log's oldest lines; 0 = unlimited
 	DepotDownloaderConfig depotDownloader;
 	QVector<Workspace> workspaces;
 	QVector<Workspace> steamWorkspaces;
 	QVector<ExtraLib> extraLibs;
-	QVector<PortOverride> portOverrides; // hand-edited (tag, name) ports for workspace libraries
 };
 
 inline QVector<Workspace> AllWorkspaces(const ConfigView& cfg) {
@@ -95,15 +89,14 @@ inline QVector<Workspace> AllWorkspaces(const ConfigView& cfg) {
 // A resolved instance: one binary of one library under one tag.
 struct Instance {
 	QString tag;
-	QString name;				// library name (file stem)
-	QString binary;				// full path to the active working or revision binary
-	QString sourceBinary;		// configured source file, if this is a workspace instance
+	QString name;		  // library name (file stem)
+	QString binary;		  // full path to the active working or revision binary
+	QString sourceBinary; // configured source file, if this is a workspace instance
 	QString relativeFile;
 	QString outputRoot;
 	QString storedVersion;
 	bool hasSource = false;
 	bool compareSource = false;
-	int port = 0;
 };
 
 // An immutable action target. An empty revision means the workspace's Current;
@@ -114,18 +107,27 @@ struct Target {
 	QString revision;
 };
 
+// The one target -> binary mapping, shared by every operation and Connect's export.
+std::optional<Instance> ResolveInstance(const QVector<Workspace>& workspaces, const QVector<ExtraLib>& extraLibs, const Target& target);
+
+// The file IDA opens for a binary: its .i64 when analyzed, otherwise the binary itself.
+QString DatabaseInput(const QString& binary);
+
 // Status of one library under one tag (one matrix cell).
 struct Cell {
 	bool present = false; // an instance exists here at all
-	bool up = false;	  // MCP server answering on the port
-	bool hasDb = false;	  // .i64 present
-	QString state;		  // human label: Ready | Update available | Not analyzed | Re-analyze | No binary | Source missing
-	QString tip;		  // detailed multi-line tooltip for the status cell
-	qint64 size = -1;	  // analyzed copy size
-	qint64 srcSize = -1;  // live-source binary size (if a source is set)
-	bool srcDiff = false; // analyzed copy differs (by hash) from its live source
+	bool up = false;	  // visible through IDA Nexus
+	bool owned = false;	  // Workbench holds a lease
+	bool opening = false;
+	QString backend;
+	QString instanceId;
+	bool hasDb = false;			   // .i64 present
+	QString state;				   // human label: Ready | Update available | Not analyzed | Re-analyze | No binary | Source missing
+	QString tip;				   // detailed multi-line tooltip for the status cell
+	qint64 size = -1;			   // analyzed copy size
+	qint64 srcSize = -1;		   // live-source binary size (if a source is set)
+	bool srcDiff = false;		   // analyzed copy differs (by hash) from its live source
 	bool sourceConfigured = false; // Sync applies only to folder workspaces
-	int port = 0;		  // effective MCP port for this instance
 };
 
 // One matrix row: a library name across all tags (cells aligned to tags order).
@@ -138,11 +140,13 @@ struct LibRow {
 struct Readiness {
 	bool ida = false;	 // ida.exe + idat.exe exist
 	bool python = false; // IDA is bound to an existing Python (idapyswitch record)
-	bool mcp = false;	 // ida-pro-mcp plugin installed in IDA's plugins dir
+	bool mcp = false;	 // official Hex-Rays GUI plugin and uvx are present
 	QString idaMsg, pythonMsg, mcpMsg;
 	QString pythonLabel; // chip text, e.g. "Python 3.14" (empty -> "IDAPython")
 	[[nodiscard]] bool Ready() const { return ida && python && mcp; }
 };
+
+class McpClient;
 
 class Manager : public QObject {
 	Q_OBJECT
@@ -168,8 +172,7 @@ public slots:
 	void Analyze(const QVector<Target>& targets, bool force);
 	void StopOperations(const QVector<Target>& targets);
 	void Replace(const QVector<Target>& targets); // pull fresh binary from live source
-	void UpdateDepot(const QStringList& tags, const QString& manifest, const QString& username = {},
-		const QString& password = {}, const QString& authCode = {}, bool rememberSession = false);
+	void UpdateDepot(const QStringList& tags, const QString& manifest, const QString& username = {}, const QString& password = {}, const QString& authCode = {}, bool rememberSession = false);
 	void SetStoredVersion(const QString& tag, const QString& version);
 	// Ask GitHub for the newest release. Emits UpdateAvailable only when it is newer than
 	// the running build; everything else (offline, rate limit, malformed answer) is a log
@@ -194,18 +197,16 @@ private:
 	Readiness ComputeReadiness() const;
 	void FinishUpdateCheck(const QByteArray& releaseJson); // parse + compare, once the reply is in
 
-	QString _host;
+	QString _uvx;
 	QString _idaGui, _idaText;
 	QString _logDir;
 	QString _analysisArgs;
 	int _maxLogMB = 10;
-	int _basePort = 8500;
 	DepotDownloaderConfig _depotDownloader;
 	QString _scriptDir;
 
 	QVector<Workspace> _workspaces;
 	QVector<ExtraLib> _extraLibs;
-	QVector<PortOverride> _portOverrides; // hand-edited (tag, name) scan ports
 
 	QVector<Instance> _instances; // source of truth for all operations
 	QStringList _tags;			  // ordered distinct tags
@@ -213,7 +214,6 @@ private:
 	QHash<QString, QString> _selectedVersions;
 	struct ActiveAnalyze;
 	QHash<QString, ActiveAnalyze*> _analyzeJobs;
-	QHash<QString, qint64> _idaPids;
 	QSet<QString> _depotTags;
 
 	std::atomic<bool> _stopDepotRequested{false}; // polled while DepotDownloader is running
@@ -226,16 +226,23 @@ private:
 	std::optional<Instance> ResolveTarget(const Target& target) const;
 	QString TargetKey(const Target& target) const;
 	bool TargetBusy(const Target& target) const;
+	bool AnalyzingDatabase(const QString& key) const; // key = DatabaseKey of the binary
+	bool DatabaseOpen(const QString& key) const;	  // listed by Nexus or leased by Workbench
 	void FinalizeAnalyze(const QString& key);
-	void PollIdaProcesses();
-	QString StartPy() const;
+	void PublishStatus();
+	void PollDatabases();
+	void EnsureMcp();
+	void OpenDatabase(const Target& target, bool gui);
+	void ReleaseDatabase(const QString& path);
 	QString AnalyzePy() const;
-
-	bool PortUp(int port, int timeoutMs = 800) const;
-	qint64 PidOnPort(int port) const;
-	bool IsExpectedServerProcess(qint64 pid) const;
-	bool KillPid(qint64 pid) const;
-	bool LaunchServer(const Instance& inst);
+	McpClient* _mcp = nullptr;
+	QHash<QString, QJsonObject> _databases;
+	QHash<QString, QString> _leases;
+	QSet<QString> _opening;
+	QSet<QString> _releaseRequested;
+	bool _listing = false;
+	quint64 _databaseEpoch = 0;
+	bool _shuttingDown = false;
 
 	// Cached SHA-256: re-hashes a file only when its size/mtime changed.
 	struct ShaEntry {
