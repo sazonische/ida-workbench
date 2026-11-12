@@ -226,6 +226,9 @@ private:
 	std::optional<Instance> ResolveTarget(const Target& target) const;
 	QString TargetKey(const Target& target) const;
 	bool TargetBusy(const Target& target) const;
+	// Empty = free; otherwise what holds it. allowCrashLeftovers lets unpacked files that
+	// no process holds pass (Replace archives them); files held by a live IDA never pass.
+	QString TargetBusyReason(const Target& target, bool allowCrashLeftovers = false) const;
 	bool AnalyzingDatabase(const QString& key) const; // key = DatabaseKey of the binary
 	bool DatabaseOpen(const QString& key) const;	  // listed by Nexus or leased by Workbench
 	void FinalizeAnalyze(const QString& key);

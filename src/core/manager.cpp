@@ -88,6 +88,30 @@ static bool UnpackedDatabaseExists(const QString& binary) {
 	return QFile::exists(binary + ".id0") || QFile::exists(binary + ".id1");
 }
 
+// A live IDA keeps its unpacked pieces open; leftovers of a crashed session are held by
+// nobody. Asking for exclusive access tells the two apart without trusting UI state.
+// Where that cannot be proven the pieces count as held.
+static bool UnpackedDatabaseHeld(const QString& binary) {
+#ifdef Q_OS_WIN
+	for (const char* ext : {".id0", ".id1", ".id2", ".nam", ".til"}) {
+		const QString path = QDir::toNativeSeparators(binary + ext);
+		if (!QFile::exists(path)) {
+			continue;
+		}
+		const HANDLE handle = CreateFileW(reinterpret_cast<const wchar_t*>(path.utf16()), GENERIC_READ | GENERIC_WRITE, 0, nullptr,
+										  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		if (handle == INVALID_HANDLE_VALUE) {
+			return true;
+		}
+		CloseHandle(handle);
+	}
+	return false;
+#else
+	Q_UNUSED(binary);
+	return true;
+#endif
+}
+
 static QString GeneratedTagColor(const QString& tag) {
 	static const char* colors[] = {"#EADDFF", "#FFD8E4", "#D3EFD5", "#D3E3FD", "#FFEFD2", "#CCE8E6", "#F0DBF5", "#E3E9C8"};
 	quint32 hash = 2166136261u;
@@ -1058,15 +1082,43 @@ std::optional<Instance> Manager::ResolveTarget(const Target& target) const {
 }
 
 bool Manager::TargetBusy(const Target& target) const {
-	if (_depotTags.contains(target.tag) || _analyzeJobs.contains(TargetKey(target))) {
-		return true;
+	return !TargetBusyReason(target).isEmpty();
+}
+
+// The skip log must name the real holder: unpacked leftovers of a crashed session look
+// "closed" in the Session column, and a generic "in use" sends the user to the wrong place.
+QString Manager::TargetBusyReason(const Target& target, bool allowCrashLeftovers) const {
+	if (_depotTags.contains(target.tag)) {
+		return QStringLiteral("a Depot update is running for this workspace");
+	}
+	if (_analyzeJobs.contains(TargetKey(target))) {
+		return QStringLiteral("analysis is running");
 	}
 	const auto requested = ResolveTarget(target);
 	if (!requested) {
-		return false;
+		return QString();
 	}
 	const QString path = DatabaseKey(requested->binary);
-	return AnalyzingDatabase(path) || _opening.contains(path) || DatabaseOpen(path) || UnpackedDatabaseExists(requested->binary);
+	if (AnalyzingDatabase(path)) {
+		return QStringLiteral("analysis is running");
+	}
+	if (_opening.contains(path)) {
+		return QStringLiteral("database is being opened or released");
+	}
+	if (DatabaseOpen(path)) {
+		return QStringLiteral("database is open in IDA");
+	}
+	if (UnpackedDatabaseExists(requested->binary)) {
+		if (UnpackedDatabaseHeld(requested->binary)) {
+			return QStringLiteral("unpacked database files (.id0/.id1) next to the binary are held by a running IDA — "
+								  "close it with save first");
+		}
+		if (!allowCrashLeftovers) {
+			return QStringLiteral("unpacked database files (.id0/.id1) of a crashed IDA session lie next to the binary — "
+								  "open it in IDA and close with save, or move .id0 .id1 .id2 .nam .til aside");
+		}
+	}
+	return QString();
 }
 
 bool Manager::DatabaseOpen(const QString& key) const {
@@ -1547,8 +1599,8 @@ void Manager::Analyze(const QVector<Target>& targets, bool force) {
 		}
 		const Instance inst = *resolved;
 		const QString label = QString("%1@%2").arg(inst.name, inst.tag);
-		if (TargetBusy(target)) {
-			emit Log(QString("[skip] %1: database is already in use").arg(label));
+		if (const QString busy = TargetBusyReason(target); !busy.isEmpty()) {
+			emit Log(QString("[skip] %1: %2").arg(label, busy));
 			++skipped;
 			continue;
 		}
@@ -1753,8 +1805,10 @@ void Manager::Replace(const QVector<Target>& targets) {
 		}
 		const Instance* inst = &*resolved;
 		const QString tag = QString("%1@%2").arg(inst->name, inst->tag);
-		if (TargetBusy(t)) {
-			emit Log(QString("[skip] %1: database is in use by another operation").arg(tag));
+		// Crash leftovers nobody holds do not block Replace: they travel into the
+		// revision with the old binary, so the unsaved work stays recoverable.
+		if (const QString busy = TargetBusyReason(t, true); !busy.isEmpty()) {
+			emit Log(QString("[skip] %1: %2").arg(tag, busy));
 			continue;
 		}
 		bool steamWorkspace = false;
@@ -1788,16 +1842,42 @@ void Manager::Replace(const QVector<Target>& targets) {
 		// unpacked pieces present only while a DB is open.
 		static const QStringList DB_EXTS = {".i64", ".idb", ".id0", ".id1", ".id2", ".nam", ".til"};
 
-		// Whether the SOURCE folder already carries an IDA database next to the
-		// binary decides the mode:
+		// Only a packed database is something to hand over. Unpacked pieces in the
+		// source mean IDA is open there or crashed: the .i64 beside them (if any) is
+		// not the latest state, and copying the pieces alone produces a database
+		// without .i64 that every later operation sees as open.
+		if (UnpackedDatabaseExists(src)) {
+			emit Log(QString("[skip] %1: the source has unpacked database files (.id0/.id1) next to %2 — IDA is still "
+							 "open there or crashed; close it with save, or move .id0 .id1 .id2 .nam .til aside")
+						 .arg(tag, QDir::toNativeSeparators(src)));
+			continue;
+		}
+
+		// Whether the SOURCE folder already carries a packed IDA database next to
+		// the binary decides the mode:
 		//   source has DB  -> full replace: copy binary + its DB (ready immediately).
 		//   source has none-> fresh binary only: wipe the destination's now-stale
 		//                     DB so the cell drops to "Not analyzed".
+		static const QStringList PACKED_EXTS = {".i64", ".idb"};
 		bool sourceHasDb = false;
-		for (const QString& e : DB_EXTS) {
+		for (const QString& e : PACKED_EXTS) {
 			if (QFile::exists(src + e)) {
 				sourceHasDb = true;
 				break;
+			}
+		}
+		// A database older than its binary was built for a previous build (a game
+		// update rewrote the binary and left the old .i64 behind). Carrying it would
+		// report "ready" for a database that does not describe this binary.
+		if (sourceHasDb) {
+			const QDateTime srcBinTime = QFileInfo(src).lastModified();
+			for (const QString& e : PACKED_EXTS) {
+				if (QFile::exists(src + e) && QFileInfo(src + e).lastModified() < srcBinTime) {
+					emit Log(QString("[warn] %1: source database %2 is older than the source binary — not carried over")
+								 .arg(tag, QFileInfo(src + e).fileName()));
+					sourceHasDb = false;
+					break;
+				}
 			}
 		}
 
@@ -1814,6 +1894,7 @@ void Manager::Replace(const QVector<Target>& targets) {
 		// shares one timestamp, so all changed files form a coherent revision.
 		const QString revisionDir = QDir(revisionsRoot).filePath(revision);
 		const QString revisionBinary = QDir(revisionDir).filePath(inst->relativeFile);
+		const bool crashLeftovers = UnpackedDatabaseExists(local);
 		bool archivedAny = false;
 		bool archiveOk = true;
 		auto archive = [&](const QString& path, const QString& destination) {
@@ -1840,6 +1921,11 @@ void Manager::Replace(const QVector<Target>& targets) {
 		if (archivedAny) {
 			emit Log(QString("[revision] %1 -> %2").arg(tag, revision));
 		}
+		if (crashLeftovers) {
+			emit Log(QString("[revision] %1: unpacked files of a crashed IDA session were archived too — open %2 in IDA "
+							 "to recover unsaved work")
+						 .arg(tag, QDir::toNativeSeparators(revisionBinary)));
+		}
 
 		// 1) Refresh the binary when it differs (QSaveFile keeps it atomic).
 		if (!binaryIdentical) {
@@ -1851,12 +1937,19 @@ void Manager::Replace(const QVector<Target>& targets) {
 		}
 
 		// 2) Clear the destination database, then mirror the source's if it has one.
+		QStringList notRemoved;
 		for (const QString& e : DB_EXTS) {
-			QFile::remove(local + e);
+			if (QFile::exists(local + e) && !QFile::remove(local + e)) {
+				notRemoved << e;
+			}
+		}
+		if (!notRemoved.isEmpty()) {
+			emit Log(QString("[warn] %1: could not remove old database files (%2) — remove them by hand")
+						 .arg(tag, notRemoved.join(" ")));
 		}
 		QStringList carried;
 		if (sourceHasDb) {
-			for (const QString& e : DB_EXTS) {
+			for (const QString& e : PACKED_EXTS) {
 				if (QFile::exists(src + e)) {
 					QString dbCopyError;
 					if (CopyFileAtomically(src + e, local + e, &dbCopyError)) {

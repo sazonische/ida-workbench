@@ -1,6 +1,7 @@
 #include "manager.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QElapsedTimer>
@@ -12,6 +13,7 @@
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <algorithm>
 #include <cstdio>
 
 namespace {
@@ -33,6 +35,11 @@ bool WriteFile(const QString& path, const QByteArray& bytes) {
 QByteArray ReadFile(const QString& path) {
 	QFile file(path);
 	return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+}
+
+bool SetModified(const QString& path, const QDateTime& time) {
+	QFile file(path);
+	return file.open(QIODevice::ReadWrite) && file.setFileTime(time, QFileDevice::FileModificationTime);
 }
 } // namespace
 
@@ -172,6 +179,117 @@ int main(int argc, char** argv) {
 		return 1;
 	}
 	manager.SetStoredVersion("current", QString());
+
+	QStringList logs;
+	QObject::connect(&manager, &Manager::Log, &app, [&](const QString& message) { logs << message; });
+	auto logged = [&logs](const QString& needle) {
+		return std::any_of(logs.cbegin(), logs.cend(), [&needle](const QString& line) { return line.contains(needle); });
+	};
+
+	// Unpacked pieces held by a live IDA next to the working binary: Replace must refuse,
+	// name them as the reason, and never sweep them.
+	if (!Check(WriteFile(sourceBinary, "newer-binary") && WriteFile(outputBinary + ".id0", "leftover"), "unpacked leftover fixture")) {
+		return 1;
+	}
+#ifdef Q_OS_WIN
+	{
+		QFile held(outputBinary + ".id0");
+		if (!Check(held.open(QIODevice::ReadWrite), "hold unpacked database open")) {
+			return 1;
+		}
+		logs.clear();
+		manager.Replace(QVector<Target>{{"current", "client"}});
+		if (!Check(ReadFile(outputBinary) == QByteArray("new-binary"), "held unpacked database blocks Replace")) {
+			return 1;
+		}
+		if (!Check(logged("held by a running IDA"), "skip names the live holder")) {
+			return 1;
+		}
+		if (!Check(QFile::exists(outputBinary + ".id0"), "held unpacked files are never swept")) {
+			return 1;
+		}
+	}
+
+	// The same pieces with no holder are leftovers of a crash: Analyze still refuses,
+	// Replace archives them with the revision and goes on.
+	logs.clear();
+	manager.Analyze(QVector<Target>{{"current", "client"}}, true);
+	if (!Check(logged("crashed IDA session") && QFile::exists(outputBinary + ".id0"), "crash leftovers block Analyze")) {
+		return 1;
+	}
+	const QStringList revisionsBefore = manager.StoredVersions("current");
+	logs.clear();
+	manager.Replace(QVector<Target>{{"current", "client"}});
+	if (!Check(ReadFile(outputBinary) == QByteArray("newer-binary") && !QFile::exists(outputBinary + ".id0"), "crash leftovers do not block Replace")) {
+		return 1;
+	}
+	QString leftoverRevision;
+	for (const QString& candidate : manager.StoredVersions("current")) {
+		if (!revisionsBefore.contains(candidate)) {
+			leftoverRevision = candidate;
+		}
+	}
+	const QString leftoverRoot = QDir(output).filePath("revisions/" + leftoverRevision);
+	if (!Check(!leftoverRevision.isEmpty() && ReadFile(QDir(leftoverRoot).filePath(relative)) == QByteArray("new-binary") &&
+				   ReadFile(QDir(leftoverRoot).filePath(relative + ".id0")) == QByteArray("leftover"), "crash leftovers archived with the old binary")) {
+		return 1;
+	}
+	if (!Check(logged("to recover unsaved work"), "archived leftovers are reported")) {
+		return 1;
+	}
+#else
+	logs.clear();
+	manager.Replace(QVector<Target>{{"current", "client"}});
+	if (!Check(ReadFile(outputBinary) == QByteArray("new-binary") && QFile::exists(outputBinary + ".id0"), "unprovable leftovers block Replace")) {
+		return 1;
+	}
+	QFile::remove(outputBinary + ".id0");
+	manager.Replace(QVector<Target>{{"current", "client"}});
+#endif
+
+	// Unpacked pieces in the SOURCE: IDA is open or crashed there. Copying them would leave
+	// a database without .i64 that looks open forever, so the module is skipped.
+	if (!Check(WriteFile(sourceBinary, "source-open-binary") && WriteFile(sourceBinary + ".id0", "open-in-source"), "unpacked source fixture")) {
+		return 1;
+	}
+	logs.clear();
+	manager.Replace(QVector<Target>{{"current", "client"}});
+	if (!Check(ReadFile(outputBinary) == QByteArray("newer-binary") && !QFile::exists(outputBinary + ".id0"), "unpacked source database is not copied")) {
+		return 1;
+	}
+	if (!Check(logged("source has unpacked database files"), "skip names the unpacked source")) {
+		return 1;
+	}
+	QFile::remove(sourceBinary + ".id0");
+
+	// A source .i64 older than its binary belongs to a previous build.
+	const QDateTime now = QDateTime::currentDateTime();
+	if (!Check(WriteFile(sourceBinary + ".i64", "previous-build-db") && SetModified(sourceBinary + ".i64", now.addDays(-1)), "stale source database fixture")) {
+		return 1;
+	}
+	logs.clear();
+	manager.Replace(QVector<Target>{{"current", "client"}});
+	if (!Check(ReadFile(outputBinary) == QByteArray("source-open-binary"), "binary replaced despite stale source database")) {
+		return 1;
+	}
+	if (!Check(!QFile::exists(outputBinary + ".i64") && logged("older than the source binary"), "stale source database is not carried")) {
+		return 1;
+	}
+
+	// A packed source .i64 newer than its binary is carried, and only the packed file.
+	if (!Check(WriteFile(sourceBinary, "newest-binary") && SetModified(sourceBinary, now.addDays(-2)) &&
+				   WriteFile(sourceBinary + ".i64", "fresh-db"), "fresh source database fixture")) {
+		return 1;
+	}
+	logs.clear();
+	manager.Replace(QVector<Target>{{"current", "client"}});
+	if (!Check(ReadFile(outputBinary) == QByteArray("newest-binary") && ReadFile(outputBinary + ".i64") == QByteArray("fresh-db"), "fresh source database carried")) {
+		return 1;
+	}
+	if (!Check(logged("source binary + database (.i64)"), "carry reports only the packed database")) {
+		return 1;
+	}
+	QFile::remove(sourceBinary + ".i64");
 
 	ConfigView withSteam = manager.View();
 	Workspace steam = withSteam.workspaces.takeFirst();
